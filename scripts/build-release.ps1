@@ -4,7 +4,8 @@ param(
     [string]$CMakePath = "",
     [string]$InnoCompilerPath = "",
     [switch]$PerUserInstall,
-    [switch]$SkipVcRedistDownload
+    [switch]$SkipVcRedistDownload,
+    [switch]$ExcludeVcRedistBundle
 )
 
 function Resolve-CMakeExecutable {
@@ -130,6 +131,9 @@ if ($PerUserInstall.IsPresent) {
 }
 if ($SkipVcRedistDownload.IsPresent) {
     $installerParams.SkipVcRedistDownload = $true
+}
+if ($ExcludeVcRedistBundle.IsPresent) {
+    $installerParams.ExcludeVcRedistBundle = $true
 }
 
 & $installerBuilderPath @installerParams

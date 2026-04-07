@@ -3,6 +3,7 @@ param(
     [string]$InstallerScriptPath = "$PSScriptRoot\..\installer\CoreGaze.iss",
     [switch]$PerUserInstall,
     [switch]$SkipVcRedistDownload,
+    [switch]$ExcludeVcRedistBundle,
     [string]$VcRedistPath = "$PSScriptRoot\..\installer\prereqs\vc_redist.x64.exe"
 )
 
@@ -79,7 +80,7 @@ if ($null -eq $resolvedScriptPath) {
     exit 1
 }
 
-if (-not $SkipVcRedistDownload.IsPresent) {
+if (-not $SkipVcRedistDownload.IsPresent -and -not $ExcludeVcRedistBundle.IsPresent) {
     if (-not (Test-Path -Path $VcRedistPath)) {
         Ensure-VcRedistBootstrap -OutputPath $VcRedistPath
     }
@@ -100,6 +101,9 @@ $compilerArgs = @()
 if ($PerUserInstall.IsPresent) {
     $compilerArgs += "/DPerUserInstall=1"
 }
+if ($ExcludeVcRedistBundle.IsPresent) {
+    $compilerArgs += "/DNoVcRedistBundle"
+}
 $compilerArgs += $resolvedScriptPath.Path
 
 & $resolvedCompilerPath @compilerArgs
@@ -109,4 +113,5 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $installMode = if ($PerUserInstall.IsPresent) { "per-user" } else { "machine-wide" }
-Write-Host "Installer build completed successfully ($installMode mode)."
+$vcBundleMode = if ($ExcludeVcRedistBundle.IsPresent) { "without VC++ runtime bundle" } else { "with VC++ runtime bundle" }
+Write-Host "Installer build completed successfully ($installMode mode, $vcBundleMode)."

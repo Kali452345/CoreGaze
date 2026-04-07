@@ -351,3 +351,38 @@
 **Immediate Next Steps:**
 - Run release script to produce current installer artifact.
 - Commit and push the latest repository changes.
+
+
+## 2026-04-07: Installer Startup Toggle Integration
+
+**Summary of Work Done:**
+- Added a new installer task option: `Start CoreGaze automatically when I sign in`.
+- Wired installer registry actions to manage `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\CoreGaze` based on startup task selection.
+- Kept runtime startup logic aligned with existing app behavior by using the same Run-key/value name.
+- Updated startup and installer docs to include installer-time startup enable/disable behavior.
+
+**Current State:**
+- Users can now opt in to auto-start directly during installation without opening the tray menu first.
+- Startup behavior remains deterministic across install and in-app toggling because both paths target the same HKCU Run value.
+
+**Immediate Next Steps:**
+- Rebuild installer and verify task selection writes/removes startup value as expected.
+
+
+## 2026-04-07: Dual GitHub Release Installers (With and Without VC Runtime)
+
+**Summary of Work Done:**
+- Added compile-time installer switch `IncludeVcRedistBundle` to allow deterministic build of both bundled and no-bundle installer variants.
+- Extended `scripts/build-installer.ps1` with `-ExcludeVcRedistBundle` so no-runtime-bundle installers can be generated without deleting local prereq files.
+- Extended `scripts/build-release.ps1` to pass through `-ExcludeVcRedistBundle`.
+- Added `scripts/build-github-release-assets.ps1` to produce both artifacts in one run:
+	- `CoreGaze-Setup-<version>-with-vcredist.exe`
+	- `CoreGaze-Setup-<version>-no-vcredist.exe`
+- Added GitHub workflow `.github/workflows/github-release-dual-installers.yml` to publish both installer variants on `v*` tags or manual dispatch.
+- Updated README and installer docs to describe the dual-release flow.
+
+**Current State:**
+- Repository now supports release publishing with two installer assets per version (bundled runtime and no bundled runtime).
+
+**Immediate Next Steps:**
+- Tag next release version (`vX.Y.Z`) and push tag to trigger dual-asset GitHub release publish.

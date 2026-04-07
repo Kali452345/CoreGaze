@@ -35,6 +35,10 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 	- `./scripts/build-release.ps1`
 - To skip runtime bootstrap download in one-command flow:
 	- `./scripts/build-release.ps1 -SkipVcRedistDownload`
+- To build a no-runtime-bundle installer variant:
+	- `./scripts/build-installer.ps1 -ExcludeVcRedistBundle -SkipVcRedistDownload`
+- To build GitHub release assets (both variants in one run):
+	- `./scripts/build-github-release-assets.ps1`
 
 ## Install Scope And UAC
 - Default behavior remains machine-wide install (`Program Files`) and requests admin privileges.
@@ -42,3 +46,14 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 	- `./scripts/build-installer.ps1 -PerUserInstall`
 	- `./scripts/build-release.ps1 -PerUserInstall`
 - In per-user mode, install path switches to `%LOCALAPPDATA%\\Programs\\CoreGaze` and installer privileges drop to `lowest`.
+
+## Startup Option
+- Installer now includes a startup task: `Start CoreGaze automatically when I sign in`.
+- When selected, installer writes `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\CoreGaze` to launch CoreGaze at user sign-in.
+- If not selected, installer removes that value during install to keep startup disabled.
+
+## GitHub Releases
+- The dual-installer release workflow is defined in `.github/workflows/github-release-dual-installers.yml`.
+- On `v*` tag push (or manual dispatch), it publishes both installer assets to GitHub Releases:
+	- `CoreGaze-Setup-<version>-with-vcredist.exe`
+	- `CoreGaze-Setup-<version>-no-vcredist.exe`

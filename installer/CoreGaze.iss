@@ -33,6 +33,7 @@ PrivilegesRequired=lowest
 #else
 PrivilegesRequired=admin
 #endif
+UsedUserAreasWarning=no
 PrivilegesRequiredOverridesAllowed=dialog
 AppPublisherURL={#MyAppPublisherURL}
 AppSupportURL={#MyAppSupportURL}
@@ -65,13 +66,20 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
+Name: "startup"; Description: "Start CoreGaze automatically when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
 Source: "..\build\CoreGaze.exe"; DestDir: "{app}"; Flags: ignoreversion
+#ifndef NoVcRedistBundle
 Source: "..\installer\prereqs\vc_redist.x64.exe"; DestDir: "{tmp}"; DestName: "vc_redist.x64.exe"; Flags: deleteafterinstall skipifsourcedoesntexist; Check: not IsVCRuntimeX64Installed
+#endif
 
 [InstallDelete]
 Type: files; Name: "{app}\TaskManagerOverlay.exe"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CoreGaze"; ValueData: """{app}\CoreGaze.exe"""; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CoreGaze"; Check: not WizardIsTaskSelected('startup'); Flags: deletevalue
 
 [Icons]
 Name: "{group}\CoreGaze"; Filename: "{app}\CoreGaze.exe"
@@ -79,7 +87,9 @@ Name: "{group}\Uninstall CoreGaze"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\CoreGaze"; Filename: "{app}\CoreGaze.exe"; Tasks: desktopicon
 
 [Run]
+#ifndef NoVcRedistBundle
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated runhidden; Check: not IsVCRuntimeX64Installed and FileExists(ExpandConstant('{tmp}\vc_redist.x64.exe'))
+#endif
 Filename: "{app}\CoreGaze.exe"; Description: "Launch CoreGaze"; Flags: nowait postinstall skipifsilent
 
 [Code]

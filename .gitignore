@@ -1,0 +1,33 @@
+# CMake and build outputs
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+
+# Ninja and compiler artifacts
+*.ninja
+.ninja_deps
+.ninja_log
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# IDE and editor state
+/.vs/
+/.vscode/
+*.user
+*.suo
+
+# Runtime/config logs and dumps
+*.log
+*.dmp
+/installer/prereqs/vc_redist.x64.exe
+
+# ImGui runtime layout
+imgui.ini

@@ -1,0 +1,68 @@
+name: Release Signing Template
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-sign:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Build Installer (optional)
+        shell: pwsh
+        run: |
+          if (Get-Command iscc.exe -ErrorAction SilentlyContinue) {
+            ./scripts/build-installer.ps1
+          } else {
+            Write-Host "Inno Setup compiler not found on runner; skipping installer build."
+          }
+
+      - name: Decode Signing Certificate
+        if: ${{ secrets.COREGAZE_CODESIGN_CERT_B64 != '' }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\codesign.pfx", [Convert]::FromBase64String("${{ secrets.COREGAZE_CODESIGN_CERT_B64 }}"))
+
+      - name: Sign Executable
+        if: ${{ secrets.COREGAZE_CODESIGN_CERT_B64 != '' }}
+        shell: pwsh
+        run: |
+          $timestampUrl = "${{ vars.COREGAZE_TIMESTAMP_URL }}"
+          if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+            $timestampUrl = "http://timestamp.digicert.com"
+          }
+
+          ./scripts/sign-artifacts.ps1 `
+            -CertificatePath "$env:RUNNER_TEMP\codesign.pfx" `
+            -CertificatePassword "${{ secrets.COREGAZE_CODESIGN_CERT_PASSWORD }}" `
+            -TimestampUrl $timestampUrl `
+            -ExecutablePath "./build/CoreGaze.exe"
+
+      - name: Sign Installer (if built)
+        if: ${{ secrets.COREGAZE_CODESIGN_CERT_B64 != '' }}
+        shell: pwsh
+        run: |
+          $timestampUrl = "${{ vars.COREGAZE_TIMESTAMP_URL }}"
+          if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+            $timestampUrl = "http://timestamp.digicert.com"
+          }
+
+          $installer = Get-ChildItem ./build/installer -Filter "CoreGaze-Setup-*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($null -ne $installer) {
+            ./scripts/sign-artifacts.ps1 `
+              -CertificatePath "$env:RUNNER_TEMP\codesign.pfx" `
+              -CertificatePassword "${{ secrets.COREGAZE_CODESIGN_CERT_PASSWORD }}" `
+              -TimestampUrl $timestampUrl `
+              -ExecutablePath "./build/CoreGaze.exe" `
+              -InstallerPath $installer.FullName
+          } else {
+            Write-Host "No installer artifact found; skipping installer signing."
+          }

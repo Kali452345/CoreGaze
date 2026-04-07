@@ -2,7 +2,7 @@ param(
     [string]$InnoCompilerPath = "",
     [string]$InstallerScriptPath = "$PSScriptRoot\..\installer\CoreGaze.iss",
     [switch]$PerUserInstall,
-    [switch]$DownloadVcRedist,
+    [switch]$SkipVcRedistDownload,
     [string]$VcRedistPath = "$PSScriptRoot\..\installer\prereqs\vc_redist.x64.exe"
 )
 
@@ -79,8 +79,13 @@ if ($null -eq $resolvedScriptPath) {
     exit 1
 }
 
-if ($DownloadVcRedist) {
-    Ensure-VcRedistBootstrap -OutputPath $VcRedistPath
+if (-not $SkipVcRedistDownload.IsPresent) {
+    if (-not (Test-Path -Path $VcRedistPath)) {
+        Ensure-VcRedistBootstrap -OutputPath $VcRedistPath
+    }
+    else {
+        Write-Host "Using existing Visual C++ Runtime bootstrapper at '$VcRedistPath'."
+    }
 }
 
 try {

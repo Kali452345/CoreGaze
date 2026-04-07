@@ -21,17 +21,20 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 - Runtime one-time migration already supports `%APPDATA%\\TaskManagerOverlay\\config.ini` to `%APPDATA%\\CoreGaze\\config.ini`.
 
 ## Runtime Bootstrap
-- Installer supports optional Microsoft Visual C++ runtime bootstrapping.
-- If `installer/prereqs/vc_redist.x64.exe` exists at compile time, it is packaged and executed during install only when VC runtime is missing.
+- Installer now bundles Microsoft Visual C++ runtime bootstrapper by default.
+- `scripts/build-installer.ps1` auto-downloads `installer/prereqs/vc_redist.x64.exe` when missing.
+- The runtime bootstrapper is packaged and executed during install only when VC runtime is missing.
 - Runtime detection uses `HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64` (`Installed=1`).
-- To auto-fetch the bootstrapper before compiling the installer, run:
-	- `./scripts/build-installer.ps1 -DownloadVcRedist`
+- To opt out of bootstrap bundling for a specific build:
+	- `./scripts/build-installer.ps1 -SkipVcRedistDownload`
 
 ## Build Integration
 - Installer script resolves app version from built `CoreGaze.exe` when available.
 - `scripts/build-installer.ps1` compiles the installer and now auto-detects `iscc.exe` from PATH or registry installs.
 - One-command unsigned release flow (build + installer):
 	- `./scripts/build-release.ps1`
+- To skip runtime bootstrap download in one-command flow:
+	- `./scripts/build-release.ps1 -SkipVcRedistDownload`
 
 ## Install Scope And UAC
 - Default behavior remains machine-wide install (`Program Files`) and requests admin privileges.

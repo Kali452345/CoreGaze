@@ -333,3 +333,21 @@
 **Immediate Next Steps:**
 - Run the one-command release script for each new release build.
 - Push the initial commit to the configured GitHub remote.
+
+
+## 2026-04-07: Default Runtime Bootstrap Bundling and Release README
+
+**Summary of Work Done:**
+- Changed installer build flow so Visual C++ runtime bootstrap is bundled by default.
+- Updated `scripts/build-installer.ps1` to auto-download `vc_redist.x64.exe` when missing and added opt-out switch `-SkipVcRedistDownload`.
+- Updated `scripts/build-release.ps1` to keep runtime bootstrap bundling enabled by default and forward `-SkipVcRedistDownload` when explicitly requested.
+- Added root `README.md` documenting build flow, installer flow, per-user mode, and runtime bootstrap behavior.
+- Updated installer documentation to reflect default bundled-runtime behavior and new switch names.
+
+**Current State:**
+- Generated installers now include VC++ bootstrap by default so end users do not need to manually download runtime prerequisites.
+- Release workflow docs and repository onboarding docs are now present and aligned with script behavior.
+
+**Immediate Next Steps:**
+- Run release script to produce current installer artifact.
+- Commit and push the latest repository changes.

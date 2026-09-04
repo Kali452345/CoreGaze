@@ -7,6 +7,8 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <dbghelp.h>
+#include <dbt.h>
+#include <wtsapi32.h>
 #include <stdio.h>
 #include <wchar.h>
 #include "SystemMonitor.h"
@@ -14,6 +16,7 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "wtsapi32.lib")
 
 // Data
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -21,6 +24,8 @@ static ID3D11DeviceContext*     g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*          g_pSwapChain = nullptr;
 static UINT                     g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView*  g_mainRenderTargetView = nullptr;
+static bool                     g_isSuspended = false;
+static HPOWERNOTIFY             g_powerNotify = NULL;
 
 static const UINT WM_TRAYICON = WM_APP + 101;
 static const UINT IDI_MAINICON = 101;
@@ -35,6 +40,9 @@ static const wchar_t* kStartupRegistryPath = L"Software\\Microsoft\\Windows\\Cur
 static const wchar_t* kStartupRegistryValueName = L"CoreGaze";
 static const wchar_t* kCurrentAppVersion = L"1.0.0";
 static const DWORD kConfigSchemaVersion = 1;
+static const int kOverlayHotkeyId = 0x0C0E;
+static const UINT kOverlayHotkeyModifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
+static const UINT kOverlayHotkeyVirtualKey = 'O';
 
 enum TrayCommandId : UINT {
     ID_TRAY_TOGGLE_OVERLAY = 5001,
@@ -43,6 +51,7 @@ enum TrayCommandId : UINT {
     ID_TRAY_SHOW_GPU = 5004,
     ID_TRAY_SHOW_DISK = 5005,
     ID_TRAY_SHOW_NETWORK = 5006,
+    ID_TRAY_RESET_POSITION = 5007,
     ID_TRAY_POLL_500 = 5101,
     ID_TRAY_POLL_1000 = 5102,
     ID_TRAY_POLL_2000 = 5103,
@@ -53,6 +62,7 @@ enum TrayCommandId : UINT {
     ID_TRAY_GPU_MODE_HIGHEST_LOAD = 5402,
     ID_TRAY_GPU_MODE_MULTI_GPU = 5403,
     ID_TRAY_GPU_MODE_AGGREGATE = 5404,
+    ID_TRAY_GPU_SHOW_VRAM = 5405,
     ID_TRAY_GPU_SELECT_BASE = 5450,
     ID_TRAY_NETWORK_PRIMARY_AUTO = 5601,
     ID_TRAY_NETWORK_PRIMARY_BASE = 5610,
@@ -72,12 +82,16 @@ struct AppSettings {
     BOOL overlayVisible;
     DWORD gpuDisplayMode;
     DWORD selectedGpuAdapterIndex;
+    BOOL showGpuVram;
     DWORD networkPrimaryMode;
     DWORD networkPrimaryIfIndex;
     BOOL networkSecondaryEnabled;
     DWORD networkSecondaryIfIndex;
     DWORD networkDisplayMode;
     BOOL startupEnabled;
+    float overlayPosX;
+    float overlayPosY;
+    BOOL hasSavedPos;
 };
 
 static AppSettings g_appSettings = {
@@ -87,11 +101,15 @@ static AppSettings g_appSettings = {
     TRUE,
     GPU_DISPLAY_TARGETED,
     0,
+    TRUE,
     NETWORK_PRIMARY_AUTO,
     0,
     FALSE,
     0,
     NETWORK_DISPLAY_RX_TX,
+    FALSE,
+    0.0f,
+    0.0f,
     FALSE
 };
 static NOTIFYICONDATAW g_trayIconData = {};
@@ -99,14 +117,26 @@ static wchar_t g_configPath[MAX_PATH] = {};
 static wchar_t g_diagnosticsPath[MAX_PATH] = {};
 static SystemMonitor* g_systemMonitor = nullptr;
 static HANDLE g_singleInstanceMutex = NULL;
+static bool g_resetPositionRequested = false;
 
 static wchar_t g_discoveredGpuNames[8][128] = {};
 static UINT g_discoveredGpuCount = 0;
-static wchar_t g_discoveredDriveLabels[26][8] = {};
+static wchar_t g_discoveredDriveLabels[26][32] = {};
 static UINT g_discoveredDriveCount = 0;
 static DWORD g_discoveredNetworkIfIndices[16] = {};
 static wchar_t g_discoveredNetworkNames[16][192] = {};
 static UINT g_discoveredNetworkCount = 0;
+
+struct NetworkBarScaleState {
+    ULONG ifIndex;
+    float downCeilingMbps;
+    float upCeilingMbps;
+    int downHighSamples;
+    int upHighSamples;
+};
+
+static NetworkBarScaleState g_primaryNetworkBarScale = { 0, 100.0f, 100.0f, 0, 0 };
+static NetworkBarScaleState g_secondaryNetworkBarScale = { 0, 100.0f, 100.0f, 0, 0 };
 
 // Forward declarations of helper functions
 bool CreateDeviceD3D(HWND hWnd);
@@ -133,7 +163,11 @@ static LONG WINAPI CoreGazeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptio
 static void WriteStringSetting(const wchar_t* section, const wchar_t* key, const wchar_t* value);
 static void CleanupSingleInstanceMutex();
 static void RemoveLegacyExecutableIfPresent();
-static void FormatMbpsValue(float mbps, char* output, int outputSize);
+static void FormatNetworkRateMbps(float mbps, char* output, int outputSize);
+static void FormatDiskRateKBps(float kbps, char* output, int outputSize);
+static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImVec4& baseColor);
+static void ResetNetworkBarScaleState(NetworkBarScaleState* state, ULONG ifIndex);
+static float ComputeAdaptiveNetworkProgress(float mbps, float* ceilingMbps, int* highSamples);
 
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
@@ -152,6 +186,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     InitializeDiagnosticsPath();
     SetUnhandledExceptionFilter(CoreGazeUnhandledExceptionFilter);
     RemoveLegacyExecutableIfPresent();
+
+    // Initialize COM for Network List Manager queries (avoids WLAN API Location icon)
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
     LoadAppSettings();
 
     // Create application window
@@ -196,6 +234,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         CleanupDeviceD3D();
         ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
         CleanupSingleInstanceMutex();
+        CoUninitialize();
         return 1;
     }
 
@@ -209,22 +248,31 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 
-    // Load custom font
-    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 22.0f);
+    // Load custom font with high-clarity rasterization settings
+    ImFontConfig fontConfig;
+    fontConfig.OversampleH = 3;
+    fontConfig.OversampleV = 2;
+    fontConfig.PixelSnapH = true;
+
+    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", 17.0f, &fontConfig);
     if (font == nullptr) {
-        // Fallback
+        font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f, &fontConfig);
+    }
+    if (font == nullptr) {
         io.Fonts->AddFontDefault();
     }
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
     
-    // Modern UI Styling Overhaul
+    // Modern UI Styling - Sleek, compact HUD
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 8.0f;
-    style.FrameRounding = 4.0f;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.60f); // 60% opacity black
-    style.ScaleAllSizes(1.2f); // Global UI scaling
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 3.0f;
+    style.WindowPadding = ImVec2(10.0f, 8.0f);
+    style.ItemSpacing = ImVec2(6.0f, 3.0f);
+    style.FramePadding = ImVec2(4.0f, 2.0f);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.65f); // 65% opacity black
 
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hwnd);
@@ -234,21 +282,43 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     g_systemMonitor = &sysMonitor;
     ApplyRuntimeSettings(hwnd);
     InitializeTrayIcon(hwnd, hInstance);
+    WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+    g_powerNotify = RegisterPowerSettingNotification(hwnd, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+
+    const BOOL hotkeyRegistered = RegisterHotKey(
+        hwnd,
+        kOverlayHotkeyId,
+        kOverlayHotkeyModifiers,
+        kOverlayHotkeyVirtualKey);
 
     // Main loop
     bool done = false;
     while (!done)
     {
-        // Active Idle Sleep check for iGPU optimization: 
-        // Sleep until either a new window message arrives, or the 1000ms loop hits.
-        // Doing this limits our application to ~1 FPS of internal execution 
-        // unless you're moving your mouse/window, saving 99% logic CPU overhead.
-        MsgWaitForMultipleObjects(0, nullptr, FALSE, g_appSettings.pollingIntervalMs, QS_ALLINPUT);
+        // "Hold ALT to Move" Win32 Dynamic Swap Logic - check before sleep for instant responsiveness
+        bool isAltHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+
+        // If system display is asleep or workstation is locked, sleep without polling or rendering.
+        // When ALT is held, poll at 16ms (60 FPS) for smooth mouse dragging.
+        if (g_isSuspended) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 2000, QS_ALLINPUT);
+        } else if (isAltHeld) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 16, QS_ALLINPUT);
+        } else {
+            // Active Idle Sleep check for iGPU optimization: 
+            // Sleep until either a new window message arrives, or the polling loop hits.
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, g_appSettings.pollingIntervalMs, QS_ALLINPUT);
+        }
 
         // Poll and handle messages (inputs, window resize, etc.)
         MSG msg;
         while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
         {
+            if (msg.message == WM_HOTKEY && msg.wParam == (WPARAM)kOverlayHotkeyId) {
+                HandleTrayCommand(hwnd, ID_TRAY_TOGGLE_OVERLAY);
+                continue;
+            }
+
             ::TranslateMessage(&msg);
             ::DispatchMessage(&msg);
             if (msg.message == WM_QUIT)
@@ -256,6 +326,26 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         }
         if (done)
             break;
+
+        if (g_isSuspended) {
+            continue;
+        }
+
+        // Dynamic WS_EX_TRANSPARENT toggle with immediate frame update
+        LONG exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        if (isAltHeld) {
+            // Remove WS_EX_TRANSPARENT so the window intercepts mouse clicks for ImGui
+            if (exStyle & WS_EX_TRANSPARENT) {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+                SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+        } else {
+            // Add WS_EX_TRANSPARENT back to resume click-through behavior
+            if (!(exStyle & WS_EX_TRANSPARENT)) {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+                SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+        }
 
         // Handle window resize (we don't resize directly, but just in case)
         if (g_ResizeWidth != 0 && g_ResizeHeight != 0)
@@ -266,7 +356,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             CreateRenderTarget();
         }
 
-        // Update hardware metrics (internally throttled to 1000ms delta)
+        // Update hardware metrics (internally throttled to polling interval)
         sysMonitor.Update();
 
         if (!g_appSettings.overlayVisible) {
@@ -278,25 +368,21 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // "Hold ALT to Move" Win32 Dynamic Swap Logic
-        bool isAltHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-        LONG exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
-
-        if (isAltHeld) {
-            // Remove WS_EX_TRANSPARENT so the window intercepts mouse clicks for ImGui
-            if (exStyle & WS_EX_TRANSPARENT) {
-                SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-            }
+        // Minimalist HUD Configuration - Saved position or default top right
+        if (g_resetPositionRequested) {
+            const RECT workAreaBounds = GetOverlayWorkAreaBounds();
+            g_appSettings.overlayPosX = (float)workAreaBounds.right - 330.0f;
+            g_appSettings.overlayPosY = (float)workAreaBounds.top + 30.0f;
+            g_appSettings.hasSavedPos = FALSE;
+            ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_Always);
+            g_resetPositionRequested = false;
+        } else if (g_appSettings.hasSavedPos) {
+            ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_FirstUseEver);
         } else {
-            // Add WS_EX_TRANSPARENT back to resume click-through behavior
-            if (!(exStyle & WS_EX_TRANSPARENT)) {
-                SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
-            }
+            const RECT workAreaBounds = GetOverlayWorkAreaBounds();
+            ImGui::SetNextWindowPos(ImVec2((float)workAreaBounds.right - 330.0f, (float)workAreaBounds.top + 30.0f), ImGuiCond_FirstUseEver);
         }
 
-        // Minimalist HUD Configuration - Default top right
-        const RECT workAreaBounds = GetOverlayWorkAreaBounds();
-        ImGui::SetNextWindowPos(ImVec2((float)workAreaBounds.right - 400.0f, (float)workAreaBounds.top + 50.0f), ImGuiCond_FirstUseEver);
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0)); // No border outline
         ImGui::Begin(kHudWindowTitle, nullptr,
             ImGuiWindowFlags_NoDecoration | 
@@ -306,27 +392,66 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             ImGuiWindowFlags_NoNav |
             (isAltHeld ? 0 : ImGuiWindowFlags_NoMove));
 
-        float barWidth = 350.0f;
-        float barHeight = 24.0f;
+        if (isAltHeld) {
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                ImVec2 mouseDelta = io.MouseDelta;
+                if (mouseDelta.x != 0.0f || mouseDelta.y != 0.0f) {
+                    g_appSettings.overlayPosX += mouseDelta.x;
+                    g_appSettings.overlayPosY += mouseDelta.y;
+                    g_appSettings.hasSavedPos = TRUE;
+                    ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_Always);
+                }
+            } else {
+                ImVec2 curPos = ImGui::GetWindowPos();
+                if (curPos.x != g_appSettings.overlayPosX || curPos.y != g_appSettings.overlayPosY) {
+                    g_appSettings.overlayPosX = curPos.x;
+                    g_appSettings.overlayPosY = curPos.y;
+                    g_appSettings.hasSavedPos = TRUE;
+                }
+            }
+        }
+
+        float barWidth = 290.0f;
+        float barHeight = 20.0f;
 
         if ((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_CPU) != 0) {
             // CPU Metrics (Blue ProgressBar)
+            char cpuTitle[128];
+            const char* cpuName = sysMonitor.GetCPUName();
+            if (cpuName != NULL && cpuName[0] != '\0' && strcmp(cpuName, "CPU") != 0) {
+                snprintf(cpuTitle, sizeof(cpuTitle), "CPU: %s", cpuName);
+            } else {
+                snprintf(cpuTitle, sizeof(cpuTitle), "CPU");
+            }
+
             char cpuBuf[64];
             snprintf(cpuBuf, sizeof(cpuBuf), "%.1f%% @ %.2f GHz", sysMonitor.GetCPUUsage(), sysMonitor.GetCPUGHz());
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "CPU");
-            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 1.0f, 1.0f)); // Blue
-            ImGui::ProgressBar(sysMonitor.GetCPUUsage() / 100.0f, ImVec2(barWidth, barHeight), cpuBuf);
+            const float cpuProgress = sysMonitor.GetCPUUsage() / 100.0f;
+            const ImVec4 cpuBaseColor(0.2f, 0.6f, 1.0f, 1.0f);
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", cpuTitle);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(cpuProgress, cpuBaseColor));
+            ImGui::ProgressBar(cpuProgress, ImVec2(barWidth, barHeight), cpuBuf);
             ImGui::PopStyleColor();
             ImGui::Spacing();
         }
 
         if ((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_RAM) != 0) {
             // RAM Metrics (Green ProgressBar)
+            char ramTitle[64];
+            const DWORD ramSpeed = sysMonitor.GetRAMSpeedMHz();
+            if (ramSpeed > 0) {
+                snprintf(ramTitle, sizeof(ramTitle), "RAM (%lu MHz)", ramSpeed);
+            } else {
+                snprintf(ramTitle, sizeof(ramTitle), "RAM");
+            }
+
             char ramBuf[64];
             snprintf(ramBuf, sizeof(ramBuf), "%.1f / %.1f GB (%.0f%%)", sysMonitor.GetRAMUsedGB(), sysMonitor.GetRAMTotalGB(), sysMonitor.GetRAMUsagePercent());
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "RAM");
-            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 1.0f, 0.4f, 1.0f)); // Green
-            ImGui::ProgressBar(sysMonitor.GetRAMUsagePercent() / 100.0f, ImVec2(barWidth, barHeight), ramBuf);
+            const float ramProgress = sysMonitor.GetRAMUsagePercent() / 100.0f;
+            const ImVec4 ramBaseColor(0.2f, 1.0f, 0.4f, 1.0f);
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", ramTitle);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(ramProgress, ramBaseColor));
+            ImGui::ProgressBar(ramProgress, ImVec2(barWidth, barHeight), ramBuf);
             ImGui::PopStyleColor();
             ImGui::Spacing();
         }
@@ -336,7 +461,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             if (diskRows == 0) {
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Disk");
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(1.0f, 0.6f, 0.1f, 1.0f));
-                ImGui::ProgressBar(0.0f, ImVec2(barWidth, barHeight), "No fixed drives selected");
+                ImGui::ProgressBar(0.0f, ImVec2(barWidth, barHeight), "No drives selected");
                 ImGui::PopStyleColor();
                 ImGui::Spacing();
             } else {
@@ -346,8 +471,22 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                         continue;
                     }
 
-                    char diskTitle[64];
-                    if (diskSnapshot.physicalDiskIndex >= 0) {
+                    char diskTitle[128];
+                    if (diskSnapshot.capacityAvailable && diskSnapshot.totalGB > 0.0f) {
+                        if (diskSnapshot.totalGB >= 1000.0f) {
+                            snprintf(diskTitle, sizeof(diskTitle), "Disk %s (%.1f/%.1f TB - %.1f TB free)",
+                                diskSnapshot.driveLabel,
+                                diskSnapshot.usedGB / 1024.0f,
+                                diskSnapshot.totalGB / 1024.0f,
+                                diskSnapshot.freeGB / 1024.0f);
+                        } else {
+                            snprintf(diskTitle, sizeof(diskTitle), "Disk %s (%.0f/%.0f GB - %.0f GB free)",
+                                diskSnapshot.driveLabel,
+                                diskSnapshot.usedGB,
+                                diskSnapshot.totalGB,
+                                diskSnapshot.freeGB);
+                        }
+                    } else if (diskSnapshot.physicalDiskIndex >= 0) {
                         snprintf(diskTitle, sizeof(diskTitle), "Disk %s (PD%d)", diskSnapshot.driveLabel, diskSnapshot.physicalDiskIndex);
                     } else {
                         snprintf(diskTitle, sizeof(diskTitle), "Disk %s", diskSnapshot.driveLabel);
@@ -356,8 +495,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     char diskBuf[192];
                     char readRateText[32];
                     char writeRateText[32];
-                    FormatMbpsValue(diskSnapshot.readMbps, readRateText, (int)sizeof(readRateText));
-                    FormatMbpsValue(diskSnapshot.writeMbps, writeRateText, (int)sizeof(writeRateText));
+                    FormatDiskRateKBps(diskSnapshot.readKBps, readRateText, (int)sizeof(readRateText));
+                    FormatDiskRateKBps(diskSnapshot.writeKBps, writeRateText, (int)sizeof(writeRateText));
                     if (diskSnapshot.fallbackTotal) {
                         snprintf(diskBuf, sizeof(diskBuf), "%.1f%% | R %s | W %s | Fallback", diskSnapshot.activePercent, readRateText, writeRateText);
                     } else {
@@ -369,7 +508,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     if (diskProgress > 1.0f) diskProgress = 1.0f;
 
                     ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", diskTitle);
-                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(1.0f, 0.6f, 0.1f, 1.0f));
+                    const ImVec4 diskBaseColor(1.0f, 0.6f, 0.1f, 1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(diskProgress, diskBaseColor));
                     ImGui::ProgressBar(diskProgress, ImVec2(barWidth, barHeight), diskBuf);
                     ImGui::PopStyleColor();
                 }
@@ -390,17 +530,23 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             char upText[64];
             char downBuf[80];
             char upBuf[80];
-            FormatMbpsValue(primaryNetwork.rxMbps, downText, (int)sizeof(downText));
-            FormatMbpsValue(primaryNetwork.txMbps, upText, (int)sizeof(upText));
+            FormatNetworkRateMbps(primaryNetwork.rxMbps, downText, (int)sizeof(downText));
+            FormatNetworkRateMbps(primaryNetwork.txMbps, upText, (int)sizeof(upText));
             snprintf(downBuf, sizeof(downBuf), "v %s", downText);
             snprintf(upBuf, sizeof(upBuf), "^ %s", upText);
 
-            float downProgress = primaryNetwork.rxMbps / 1000.0f;
-            float upProgress = primaryNetwork.txMbps / 1000.0f;
-            if (downProgress < 0.0f) downProgress = 0.0f;
-            if (upProgress < 0.0f) upProgress = 0.0f;
-            if (downProgress > 1.0f) downProgress = 1.0f;
-            if (upProgress > 1.0f) upProgress = 1.0f;
+            if (g_primaryNetworkBarScale.ifIndex != primaryNetwork.ifIndex) {
+                ResetNetworkBarScaleState(&g_primaryNetworkBarScale, primaryNetwork.ifIndex);
+            }
+
+            const float downProgress = ComputeAdaptiveNetworkProgress(
+                primaryNetwork.rxMbps,
+                &g_primaryNetworkBarScale.downCeilingMbps,
+                &g_primaryNetworkBarScale.downHighSamples);
+            const float upProgress = ComputeAdaptiveNetworkProgress(
+                primaryNetwork.txMbps,
+                &g_primaryNetworkBarScale.upCeilingMbps,
+                &g_primaryNetworkBarScale.upHighSamples);
 
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
             ImGui::ProgressBar(downProgress, ImVec2(miniBarWidth, barHeight), downBuf);
@@ -420,17 +566,23 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                 char upText2[64];
                 char downBuf2[80];
                 char upBuf2[80];
-                FormatMbpsValue(secondaryNetwork.rxMbps, downText2, (int)sizeof(downText2));
-                FormatMbpsValue(secondaryNetwork.txMbps, upText2, (int)sizeof(upText2));
+                FormatNetworkRateMbps(secondaryNetwork.rxMbps, downText2, (int)sizeof(downText2));
+                FormatNetworkRateMbps(secondaryNetwork.txMbps, upText2, (int)sizeof(upText2));
                 snprintf(downBuf2, sizeof(downBuf2), "v %s", downText2);
                 snprintf(upBuf2, sizeof(upBuf2), "^ %s", upText2);
 
-                float downProgress2 = secondaryNetwork.rxMbps / 1000.0f;
-                float upProgress2 = secondaryNetwork.txMbps / 1000.0f;
-                if (downProgress2 < 0.0f) downProgress2 = 0.0f;
-                if (upProgress2 < 0.0f) upProgress2 = 0.0f;
-                if (downProgress2 > 1.0f) downProgress2 = 1.0f;
-                if (upProgress2 > 1.0f) upProgress2 = 1.0f;
+                if (g_secondaryNetworkBarScale.ifIndex != secondaryNetwork.ifIndex) {
+                    ResetNetworkBarScaleState(&g_secondaryNetworkBarScale, secondaryNetwork.ifIndex);
+                }
+
+                const float downProgress2 = ComputeAdaptiveNetworkProgress(
+                    secondaryNetwork.rxMbps,
+                    &g_secondaryNetworkBarScale.downCeilingMbps,
+                    &g_secondaryNetworkBarScale.downHighSamples);
+                const float upProgress2 = ComputeAdaptiveNetworkProgress(
+                    secondaryNetwork.txMbps,
+                    &g_secondaryNetworkBarScale.upCeilingMbps,
+                    &g_secondaryNetworkBarScale.upHighSamples);
 
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
                 ImGui::ProgressBar(downProgress2, ImVec2(miniBarWidth, barHeight), downBuf2);
@@ -441,6 +593,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.9f, 0.45f, 1.0f, 1.0f));
                 ImGui::ProgressBar(upProgress2, ImVec2(miniBarWidth, barHeight), upBuf2);
                 ImGui::PopStyleColor();
+            } else {
+                ResetNetworkBarScaleState(&g_secondaryNetworkBarScale, 0);
             }
 
             ImGui::Spacing();
@@ -468,37 +622,44 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                         snprintf(gpuTitle, sizeof(gpuTitle), "GPU");
                     }
 
-                    char gpuBuf[256];
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s: %s", gpuTitle, gpuSnapshot.adapterName);
+
+                    // GPU Core Utilization Bar
+                    char gpuBuf[64];
                     if (gpuSnapshot.utilizationAvailable) {
-                        snprintf(gpuBuf, sizeof(gpuBuf), "%.1f%% (%s) | %.1f/%.1f GB + %.1f GB shared",
-                            gpuSnapshot.usagePercent,
-                            gpuSnapshot.engineLabel,
-                            gpuSnapshot.dedicatedUsedGB,
-                            gpuSnapshot.dedicatedTotalGB,
-                            gpuSnapshot.sharedUsedGB);
-                    } else if (gpuSnapshot.memoryAvailable) {
-                        snprintf(gpuBuf, sizeof(gpuBuf), "N/A (Memory) | %.1f/%.1f GB + %.1f GB shared",
-                            gpuSnapshot.dedicatedUsedGB,
-                            gpuSnapshot.dedicatedTotalGB,
-                            gpuSnapshot.sharedUsedGB);
+                        snprintf(gpuBuf, sizeof(gpuBuf), "%.1f%% (%s)", gpuSnapshot.usagePercent, gpuSnapshot.engineLabel);
                     } else {
-                        snprintf(gpuBuf, sizeof(gpuBuf), "Unavailable");
+                        snprintf(gpuBuf, sizeof(gpuBuf), "N/A");
                     }
-
-                    float gpuProgress = 0.0f;
-                    if (gpuSnapshot.utilizationAvailable) {
-                        gpuProgress = gpuSnapshot.usagePercent / 100.0f;
-                    } else if (gpuSnapshot.dedicatedTotalGB > 0.0f) {
-                        gpuProgress = gpuSnapshot.dedicatedUsedGB / gpuSnapshot.dedicatedTotalGB;
-                    }
-
+                    float gpuProgress = gpuSnapshot.utilizationAvailable ? (gpuSnapshot.usagePercent / 100.0f) : 0.0f;
                     if (gpuProgress > 1.0f) gpuProgress = 1.0f;
                     if (gpuProgress < 0.0f) gpuProgress = 0.0f;
 
-                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s: %s", gpuTitle, gpuSnapshot.adapterName);
-                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.1f, 0.9f, 0.9f, 1.0f));
+                    const ImVec4 gpuBaseColor(0.1f, 0.9f, 0.9f, 1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(gpuProgress, gpuBaseColor));
                     ImGui::ProgressBar(gpuProgress, ImVec2(barWidth, barHeight), gpuBuf);
                     ImGui::PopStyleColor();
+
+                    // Dedicated VRAM Progress Bar
+                    if (g_appSettings.showGpuVram && gpuSnapshot.memoryAvailable && gpuSnapshot.dedicatedTotalGB > 0.0f) {
+                        char vramBuf[96];
+                        float vramPercent = (gpuSnapshot.dedicatedUsedGB / gpuSnapshot.dedicatedTotalGB) * 100.0f;
+                        if (gpuSnapshot.sharedUsedGB > 0.05f) {
+                            snprintf(vramBuf, sizeof(vramBuf), "VRAM: %.1f/%.1f GB (%.0f%%) +%.1fG",
+                                gpuSnapshot.dedicatedUsedGB, gpuSnapshot.dedicatedTotalGB, vramPercent, gpuSnapshot.sharedUsedGB);
+                        } else {
+                            snprintf(vramBuf, sizeof(vramBuf), "VRAM: %.1f / %.1f GB (%.0f%%)",
+                                gpuSnapshot.dedicatedUsedGB, gpuSnapshot.dedicatedTotalGB, vramPercent);
+                        }
+                        float vramProgress = gpuSnapshot.dedicatedUsedGB / gpuSnapshot.dedicatedTotalGB;
+                        if (vramProgress > 1.0f) vramProgress = 1.0f;
+                        if (vramProgress < 0.0f) vramProgress = 0.0f;
+
+                        const ImVec4 vramBaseColor(0.65f, 0.35f, 1.0f, 1.0f);
+                        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(vramProgress, vramBaseColor));
+                        ImGui::ProgressBar(vramProgress, ImVec2(barWidth, barHeight), vramBuf);
+                        ImGui::PopStyleColor();
+                    }
                 }
                 ImGui::Spacing();
             }
@@ -523,6 +684,14 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     // Cleanup
     SaveAppSettings();
     CleanupTrayIcon();
+    if (hotkeyRegistered) {
+        UnregisterHotKey(hwnd, kOverlayHotkeyId);
+    }
+    if (g_powerNotify != NULL) {
+        UnregisterPowerSettingNotification(g_powerNotify);
+        g_powerNotify = NULL;
+    }
+    WTSUnRegisterSessionNotification(hwnd);
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
@@ -534,6 +703,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     ::DestroyWindow(hwnd);
     ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
     CleanupSingleInstanceMutex();
+    CoUninitialize();
 
     return 0;
 }
@@ -783,7 +953,7 @@ static HICON LoadAppIcon(HINSTANCE hInstance, int width, int height) {
     return (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_MAINICON), IMAGE_ICON, width, height, LR_DEFAULTCOLOR | LR_SHARED);
 }
 
-static void FormatMbpsValue(float mbps, char* output, int outputSize) {
+static void FormatNetworkRateMbps(float mbps, char* output, int outputSize) {
     if (output == NULL || outputSize <= 0) {
         return;
     }
@@ -798,6 +968,118 @@ static void FormatMbpsValue(float mbps, char* output, int outputSize) {
     } else {
         snprintf(output, outputSize, "%.0f Kbps", value * 1000.0f);
     }
+}
+
+static void FormatDiskRateKBps(float kbps, char* output, int outputSize) {
+    if (output == NULL || outputSize <= 0) {
+        return;
+    }
+
+    float value = kbps;
+    if (value < 0.0f) {
+        value = 0.0f;
+    }
+
+    if (value >= (1024.0f * 1024.0f)) {
+        snprintf(output, outputSize, "%.2f GB/s", value / (1024.0f * 1024.0f));
+    } else if (value >= 1024.0f) {
+        snprintf(output, outputSize, "%.1f MB/s", value / 1024.0f);
+    } else {
+        snprintf(output, outputSize, "%.0f KB/s", value);
+    }
+}
+
+static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImVec4& baseColor) {
+    const float kWarningThreshold = 0.80f;
+    const float kCriticalThreshold = 0.95f;
+    const ImVec4 kWarningColor(1.0f, 0.55f, 0.0f, 1.0f);
+    const ImVec4 kCriticalColor(1.0f, 0.15f, 0.15f, 1.0f);
+
+    float clampedFraction = progressFraction;
+    if (clampedFraction < 0.0f) {
+        clampedFraction = 0.0f;
+    } else if (clampedFraction > 1.0f) {
+        clampedFraction = 1.0f;
+    }
+
+    if (clampedFraction >= kCriticalThreshold) {
+        return kCriticalColor;
+    }
+
+    if (clampedFraction >= kWarningThreshold) {
+        return kWarningColor;
+    }
+
+    return baseColor;
+}
+
+static void ResetNetworkBarScaleState(NetworkBarScaleState* state, ULONG ifIndex) {
+    if (state == NULL) {
+        return;
+    }
+
+    state->ifIndex = ifIndex;
+    state->downCeilingMbps = 100.0f;
+    state->upCeilingMbps = 100.0f;
+    state->downHighSamples = 0;
+    state->upHighSamples = 0;
+}
+
+static float ComputeAdaptiveNetworkProgress(float mbps, float* ceilingMbps, int* highSamples) {
+    const float kMinCeilingMbps = 100.0f;
+    const float kHighWatermarkRatio = 0.85f;
+    const float kLowWatermarkRatio = 0.20f;
+    const float kCeilingHeadroomFactor = 1.20f;
+    const float kCeilingDecayFactor = 0.97f;
+    const int kHighSamplesToGrow = 2;
+
+    if (ceilingMbps == NULL || highSamples == NULL) {
+        return 0.0f;
+    }
+
+    float value = mbps;
+    if (value < 0.0f) {
+        value = 0.0f;
+    }
+
+    if (*ceilingMbps < kMinCeilingMbps) {
+        *ceilingMbps = kMinCeilingMbps;
+    }
+
+    if (value >= (*ceilingMbps * kHighWatermarkRatio)) {
+        if (*highSamples < kHighSamplesToGrow) {
+            ++(*highSamples);
+        }
+
+        if (*highSamples >= kHighSamplesToGrow) {
+            const float expandedCeiling = value * kCeilingHeadroomFactor;
+            if (expandedCeiling > *ceilingMbps) {
+                *ceilingMbps = expandedCeiling;
+            }
+            *highSamples = 0;
+        }
+    } else if (value <= (*ceilingMbps * kLowWatermarkRatio)) {
+        *highSamples = 0;
+        *ceilingMbps *= kCeilingDecayFactor;
+        if (*ceilingMbps < kMinCeilingMbps) {
+            *ceilingMbps = kMinCeilingMbps;
+        }
+    } else if (*highSamples > 0) {
+        --(*highSamples);
+    }
+
+    if (*ceilingMbps <= 0.0f) {
+        return 0.0f;
+    }
+
+    float progress = value / *ceilingMbps;
+    if (progress < 0.0f) {
+        progress = 0.0f;
+    } else if (progress > 1.0f) {
+        progress = 1.0f;
+    }
+
+    return progress;
 }
 
 static UINT CheckedFlag(BOOL checked) {
@@ -877,6 +1159,7 @@ void LoadAppSettings() {
     g_appSettings.pollingIntervalMs = NormalizePollingRate(GetPrivateProfileIntW(L"Polling", L"IntervalMs", 1000, g_configPath));
     g_appSettings.gpuDisplayMode = NormalizeGpuDisplayMode(GetPrivateProfileIntW(L"GPU", L"DisplayMode", GPU_DISPLAY_TARGETED, g_configPath));
     g_appSettings.selectedGpuAdapterIndex = (DWORD)GetPrivateProfileIntW(L"GPU", L"SelectedAdapterIndex", 0, g_configPath);
+    g_appSettings.showGpuVram = GetPrivateProfileIntW(L"GPU", L"ShowVram", 1, g_configPath) ? TRUE : FALSE;
     g_appSettings.networkPrimaryMode = NormalizeNetworkPrimaryMode(GetPrivateProfileIntW(L"Network", L"PrimaryMode", NETWORK_PRIMARY_AUTO, g_configPath));
     g_appSettings.networkPrimaryIfIndex = (DWORD)GetPrivateProfileIntW(L"Network", L"PrimaryIfIndex", 0, g_configPath);
     g_appSettings.networkSecondaryEnabled = GetPrivateProfileIntW(L"Network", L"SecondaryEnabled", 0, g_configPath) ? TRUE : FALSE;
@@ -884,6 +1167,12 @@ void LoadAppSettings() {
     g_appSettings.networkDisplayMode = NormalizeNetworkDisplayMode(GetPrivateProfileIntW(L"Network", L"DisplayMode", NETWORK_DISPLAY_RX_TX, g_configPath));
     BOOL startupRegistryEnabled = IsStartupEnabledInRegistry() ? TRUE : FALSE;
     g_appSettings.startupEnabled = GetPrivateProfileIntW(L"General", L"StartWithWindows", startupRegistryEnabled ? 1 : 0, g_configPath) ? TRUE : FALSE;
+    g_appSettings.hasSavedPos = GetPrivateProfileIntW(L"Window", L"HasSavedPos", 0, g_configPath) ? TRUE : FALSE;
+    wchar_t posXBuf[32] = {}, posYBuf[32] = {};
+    GetPrivateProfileStringW(L"Window", L"PosX", L"0", posXBuf, 32, g_configPath);
+    GetPrivateProfileStringW(L"Window", L"PosY", L"0", posYBuf, 32, g_configPath);
+    g_appSettings.overlayPosX = (float)_wtof(posXBuf);
+    g_appSettings.overlayPosY = (float)_wtof(posYBuf);
     WriteUIntSetting(L"Version", L"ConfigSchemaVersion", kConfigSchemaVersion);
     WriteStringSetting(L"Version", L"LastLaunchedVersion", kCurrentAppVersion);
     SetStartupEnabledInRegistry(g_appSettings.startupEnabled);
@@ -896,12 +1185,24 @@ void SaveAppSettings() {
     WriteUIntSetting(L"Polling", L"IntervalMs", NormalizePollingRate(g_appSettings.pollingIntervalMs));
     WriteUIntSetting(L"GPU", L"DisplayMode", NormalizeGpuDisplayMode(g_appSettings.gpuDisplayMode));
     WriteUIntSetting(L"GPU", L"SelectedAdapterIndex", g_appSettings.selectedGpuAdapterIndex);
+    WriteUIntSetting(L"GPU", L"ShowVram", g_appSettings.showGpuVram ? 1u : 0u);
     WriteUIntSetting(L"Network", L"PrimaryMode", NormalizeNetworkPrimaryMode(g_appSettings.networkPrimaryMode));
     WriteUIntSetting(L"Network", L"PrimaryIfIndex", g_appSettings.networkPrimaryIfIndex);
     WriteUIntSetting(L"Network", L"SecondaryEnabled", g_appSettings.networkSecondaryEnabled ? 1u : 0u);
     WriteUIntSetting(L"Network", L"SecondaryIfIndex", g_appSettings.networkSecondaryIfIndex);
     WriteUIntSetting(L"Network", L"DisplayMode", NormalizeNetworkDisplayMode(g_appSettings.networkDisplayMode));
     WriteUIntSetting(L"General", L"StartWithWindows", g_appSettings.startupEnabled ? 1u : 0u);
+    WriteUIntSetting(L"Window", L"HasSavedPos", g_appSettings.hasSavedPos ? 1u : 0u);
+    if (g_appSettings.hasSavedPos) {
+        wchar_t buf[32];
+        swprintf_s(buf, L"%.1f", g_appSettings.overlayPosX);
+        WriteStringSetting(L"Window", L"PosX", buf);
+        swprintf_s(buf, L"%.1f", g_appSettings.overlayPosY);
+        WriteStringSetting(L"Window", L"PosY", buf);
+    } else {
+        WriteStringSetting(L"Window", L"PosX", L"");
+        WriteStringSetting(L"Window", L"PosY", L"");
+    }
     WriteUIntSetting(L"Version", L"ConfigSchemaVersion", kConfigSchemaVersion);
     WriteStringSetting(L"Version", L"LastLaunchedVersion", kCurrentAppVersion);
     SetStartupEnabledInRegistry(g_appSettings.startupEnabled);
@@ -978,11 +1279,15 @@ void DiscoverHardwareForMenu() {
 
         wchar_t rootPath[4] = { (wchar_t)(L'A' + i), L':', L'\\', L'\0' };
         UINT driveType = GetDriveTypeW(rootPath);
-        if (driveType != DRIVE_FIXED) {
+        if (driveType != DRIVE_FIXED && driveType != DRIVE_REMOVABLE) {
             continue;
         }
 
-        swprintf_s(g_discoveredDriveLabels[g_discoveredDriveCount], L"%c:", (wchar_t)(L'A' + i));
+        if (driveType == DRIVE_REMOVABLE) {
+            swprintf_s(g_discoveredDriveLabels[g_discoveredDriveCount], L"%c: (Removable)", (wchar_t)(L'A' + i));
+        } else {
+            swprintf_s(g_discoveredDriveLabels[g_discoveredDriveCount], L"%c:", (wchar_t)(L'A' + i));
+        }
         ++g_discoveredDriveCount;
     }
 
@@ -1013,6 +1318,9 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
     switch (commandId) {
     case ID_TRAY_TOGGLE_OVERLAY:
         g_appSettings.overlayVisible = g_appSettings.overlayVisible ? FALSE : TRUE;
+        break;
+    case ID_TRAY_RESET_POSITION:
+        g_resetPositionRequested = true;
         break;
     case ID_TRAY_SHOW_CPU:
         g_appSettings.visibleMetricsMask ^= SYSTEM_METRIC_CPU;
@@ -1049,6 +1357,9 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
         break;
     case ID_TRAY_GPU_MODE_AGGREGATE:
         g_appSettings.gpuDisplayMode = GPU_DISPLAY_AGGREGATE;
+        break;
+    case ID_TRAY_GPU_SHOW_VRAM:
+        g_appSettings.showGpuVram = !g_appSettings.showGpuVram;
         break;
     case ID_TRAY_DISK_SELECT_ALL: {
         DWORD discoveredMask = 0;
@@ -1147,6 +1458,7 @@ void ShowTrayContextMenu(HWND hwnd) {
     HMENU networkDisplayMenu = CreatePopupMenu();
 
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag(g_appSettings.overlayVisible), ID_TRAY_TOGGLE_OVERLAY, L"Show Overlay");
+    AppendMenuW(rootMenu, MF_STRING, ID_TRAY_RESET_POSITION, L"Reset Overlay Position");
     AppendMenuW(rootMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_CPU) != 0), ID_TRAY_SHOW_CPU, L"Show CPU");
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_RAM) != 0), ID_TRAY_SHOW_RAM, L"Show RAM");
@@ -1159,6 +1471,8 @@ void ShowTrayContextMenu(HWND hwnd) {
     AppendMenuW(gpuModeMenu, MF_STRING | CheckedFlag(g_appSettings.gpuDisplayMode == GPU_DISPLAY_MULTI_GPU), ID_TRAY_GPU_MODE_MULTI_GPU, L"Multi-GPU (All Rows)");
     AppendMenuW(gpuModeMenu, MF_STRING | CheckedFlag(g_appSettings.gpuDisplayMode == GPU_DISPLAY_AGGREGATE), ID_TRAY_GPU_MODE_AGGREGATE, L"Aggregate (Average Util)");
 
+    AppendMenuW(gpuMenu, MF_STRING | CheckedFlag(g_appSettings.showGpuVram), ID_TRAY_GPU_SHOW_VRAM, L"Show Dedicated VRAM");
+    AppendMenuW(gpuMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(gpuMenu, MF_POPUP, (UINT_PTR)gpuModeMenu, L"Display Mode");
     AppendMenuW(gpuMenu, MF_SEPARATOR, 0, NULL);
 
@@ -1175,7 +1489,7 @@ void ShowTrayContextMenu(HWND hwnd) {
     AppendMenuW(rootMenu, MF_POPUP, (UINT_PTR)gpuMenu, L"GPUs");
 
     if (g_discoveredDriveCount == 0) {
-        AppendMenuW(diskMenu, MF_STRING | MF_GRAYED, 0, L"No fixed drives detected");
+        AppendMenuW(diskMenu, MF_STRING | MF_GRAYED, 0, L"No drives detected");
     } else {
         for (UINT i = 0; i < g_discoveredDriveCount; ++i) {
             wchar_t driveLetter = g_discoveredDriveLabels[i][0];
@@ -1270,6 +1584,44 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SaveAppSettings();
         }
         return 0;
+    case WM_DEVICECHANGE:
+        if (g_systemMonitor != nullptr) {
+            g_systemMonitor->RequestDiskTopologyRefresh();
+        }
+        return TRUE;
+    case WM_WTSSESSION_CHANGE:
+        if (wParam == WTS_SESSION_LOCK) {
+            g_isSuspended = true;
+        } else if (wParam == WTS_SESSION_UNLOCK) {
+            g_isSuspended = false;
+            if (g_systemMonitor != nullptr) {
+                g_systemMonitor->RefreshNetworkIdentityNow();
+                g_systemMonitor->RequestDiskTopologyRefresh();
+            }
+        }
+        return 0;
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMSUSPEND) {
+            g_isSuspended = true;
+        } else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+            g_isSuspended = false;
+            if (g_systemMonitor != nullptr) {
+                g_systemMonitor->RefreshNetworkIdentityNow();
+                g_systemMonitor->RequestDiskTopologyRefresh();
+            }
+        } else if (wParam == PBT_POWERSETTINGCHANGE && lParam != 0) {
+            POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)lParam;
+            if (pbs->PowerSetting == GUID_CONSOLE_DISPLAY_STATE && pbs->DataLength >= sizeof(DWORD)) {
+                DWORD displayState = *(DWORD*)pbs->Data;
+                // 0 = off, 1 = on, 2 = dimmed
+                g_isSuspended = (displayState == 0);
+                if (!g_isSuspended && g_systemMonitor != nullptr) {
+                    g_systemMonitor->RefreshNetworkIdentityNow();
+                    g_systemMonitor->RequestDiskTopologyRefresh();
+                }
+            }
+        }
+        return TRUE;
     case WM_SIZE:
         if (wParam == SIZE_MINIMIZED)
             return 0;
@@ -1290,4 +1642,4 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-}
+}

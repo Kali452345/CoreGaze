@@ -87,6 +87,11 @@ $resolvedBuildDirectory = Resolve-Path -Path $BuildDirectory -ErrorAction Silent
 if ($null -eq $resolvedBuildDirectory) {
     New-Item -Path $BuildDirectory -ItemType Directory -Force | Out-Null
     $resolvedBuildDirectory = Resolve-Path -Path $BuildDirectory
+$w64DevkitBin = "$env:LOCALAPPDATA\w64devkit\bin"
+if (Test-Path $w64DevkitBin) {
+    if ($env:PATH -notlike "*$w64DevkitBin*") {
+        $env:PATH = "$w64DevkitBin;$env:PATH"
+    }
 }
 
 try {

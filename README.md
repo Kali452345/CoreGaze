@@ -33,16 +33,6 @@ This flow:
 - Bundles the runtime bootstrapper into the installer so users do not need to fetch VC++ runtime manually.
 - Produces installer output under `build/installer/`.
 
-## Build GitHub Release Assets (Dual Installers)
-```powershell
-./scripts/build-github-release-assets.ps1
-```
-
-This produces both variants in `build/installer/`:
-- `CoreGaze-Setup-<version>-with-vcredist.exe`
-- `CoreGaze-Setup-<version>-no-vcredist.exe`
-
-GitHub workflow `.github/workflows/github-release-dual-installers.yml` publishes both assets to Releases on tag push (`v*`) or manual dispatch.
 
 ## Installer Only
 ```powershell

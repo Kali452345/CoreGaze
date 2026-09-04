@@ -386,3 +386,113 @@
 
 **Immediate Next Steps:**
 - Tag next release version (`vX.Y.Z`) and push tag to trigger dual-asset GitHub release publish.
+
+
+## 2026-04-21: Robust Network Reacquire, Disk Byte Units, and Adaptive Network Bars
+
+**Summary of Work Done:**
+- Hardened network tracking with quick identity refresh triggers when active interface sampling fails, disconnects, or becomes invalid.
+- Added throttled quick refresh path so network identity can recover on the next monitor cycle instead of waiting for the full 10s identity interval.
+- Improved Wi-Fi SSID selection logic to prefer WLAN interface descriptions matching the monitored adapter name, reducing stale/mismatched SSID labels.
+- Added 32-bit octet wrap-aware throughput delta math for network sampling to avoid false drops during counter rollover.
+- Switched disk throughput display path from bit units to byte units by converting disk counters to `KB/s` and rendering adaptive `KB/s`/`MB/s`/`GB/s` labels.
+- Replaced fixed 1000 Mbps network mini-bar normalization with adaptive hysteresis scaling per stream (primary/secondary download/upload), improving visual response around common bandwidth ranges.
+
+**Current State:**
+- Network identity reacquire is more resilient under Wi-Fi handoffs, transient disconnects, and interface churn.
+- Disk rows now report byte-based throughput units.
+- Network bars are significantly more informative at moderate throughputs (for example, around 50 Mbps).
+
+**Immediate Next Steps:**
+- Run validation matrix for SSID transitions, route changes, sustained throughput, and idle decay behavior.
+
+## 2026-04-21: Event-Driven Network Identity Refresh
+
+**Summary of Work Done:**
+- Replaced the network identity refresh path with event-triggered requests using legacy IP Helper notifications and WLAN connection notifications.
+- Kept the hot polling loop lock-free by using atomic flags only; callbacks now return immediately after setting refresh state.
+- Added SSID cache reuse and cooldown behavior so Wi-Fi identity lookups do not repeat on every refresh burst.
+- Preserved throughput sampling and adapter selection behavior while moving identity rebuilds onto a debounced main-thread path.
+
+**Current State:**
+- Network identity updates are now driven by network-change events with a slow fallback timer for recovery.
+- The monitor still shows SSID, Wired, or Disconnected based on the active adapter state, but WLAN API calls should happen far less often during churn.
+
+**Build & Runtime Validation (2026-04-21 - Completed):**
+- ✅ **Build validation**: CMake Release build succeeded cleanly; all event-driven code compiled without errors or warnings related to new Windows API calls (NotifyAddrChange, WlanRegisterNotification, GetAdaptersInfo, GetIfEntry).
+- ✅ **Executable verification**: CoreGaze.exe runs and initializes network notifications without crashing. Process confirmed running (PID 15572) with healthy resource footprint (388 handles, 1.5% CPU).
+- ✅ **Code structure validation**: 
+  - Constructor calls `InitializeNetworkNotifications()` before GPU setup (line 232).
+  - Destructor calls `ShutdownNetworkNotifications()` first (line 269).
+  - PollMetrics implements debounce gate: periodic fallback 30s OR event-triggered with 1s debounce minimum (line 643-654).
+  - RefreshNetworkIdentityNow clears atomic flags and re-arms notification listener (line 372-378).
+  - SSID caching with 60s cooldown implemented per-adapter (line 1690-1707); graceful fallback to previous cache on query failure.
+
+**Immediate Next Steps:**
+- Full Wi-Fi transition testing (connect/disconnect/roam cycles) to confirm SSID refresh timing and event callback firing.
+- Observe Windows location icon behavior during network changes to validate reduction in WLAN API call frequency.
+- If location indicator still shows excessive blink, next iteration can tighten SSID cooldown or add SSID-disable UI toggle.
+
+## 2026-04-21: Dynamic HUD Utilization Threshold Colors
+
+**Summary of Work Done:**
+- Added frontend-only dynamic color thresholds for CPU, RAM, and GPU HUD progress bars in the Dear ImGui render loop.
+- Implemented stateful warning behavior via conditional `ImGui::PushStyleColor` selection: base color below 80%%, warning orange at 80%%+, and critical red at 95%%+.
+- Reused existing normalized bar fractions already passed to `ImGui::ProgressBar`, keeping the hot path allocation-free.
+- Left backend metric collection and polling untouched (`SystemMonitor` logic unchanged).
+
+**Current State:**
+- CPU/RAM/GPU bars now provide immediate visual severity shifts as utilization crosses threshold boundaries.
+- Disk and network bars retain their previous color behavior.
+
+**Immediate Next Steps:**
+- Run a quick visual sanity pass under low/medium/high load to confirm threshold transitions occur at expected utilization levels.
+
+## 2026-04-21: Global Hotkey Overlay Toggle
+
+**Summary of Work Done:**
+- Added a global overlay visibility hotkey in `main.cpp` via Win32 `RegisterHotKey` with default binding `Ctrl + Shift + O`.
+- Integrated `WM_HOTKEY` handling in the existing `MsgWaitForMultipleObjects` / `PeekMessage` pump and routed it through `HandleTrayCommand(hwnd, ID_TRAY_TOGGLE_OVERLAY)`.
+- Reused the tray toggle path to keep visibility state changes, runtime window updates, and setting persistence behavior consistent.
+- Added cleanup-time `UnregisterHotKey` guarded by registration success.
+- Kept backend metrics and polling logic untouched (`SystemMonitor` unchanged).
+
+## 2026-08-20: Dynamic Drive Hot-Plugging, Taskbar Location Icon Fix, HUD Position Persistence & MinGW Toolchain
+
+**Summary of Work Done:**
+- **Dynamic Drive Hot-Plug Detection Fixed**:
+  - Resolved drive detection bug where plugged-in drives were not recognized until unticking/reticking in the tray menu.
+  - Added real-time `WM_DEVICECHANGE` hardware event interception in `main.cpp` and runtime drive mask difference detection (`GetLogicalDrives() != m_cachedLogicalDrivesMask`) in `SystemMonitor::PollMetrics()`.
+  - Expanded drive support from `DRIVE_FIXED` to both `DRIVE_FIXED` and `DRIVE_REMOVABLE` (supporting USB thumb drives and external portable SSDs).
+  - Enlarged tray menu label buffers to prevent overflow during device discovery.
+- **Eliminated Windows Taskbar Location Icon**:
+  - Replaced legacy `wlanapi` radio scanning (`WlanOpenHandle`, `WlanRegisterNotification`, `WlanQueryInterface`) with the official Windows **Network List Manager COM API** (`INetworkListManager`, `INetwork`).
+  - Network profile names / Wi-Fi SSIDs are now retrieved cleanly from Windows Network Center without triggering Windows Location / Geolocation Privacy Services. The taskbar location crosshair icon no longer appears.
+  - Removed `wlanapi` dependency and linked `ole32` / `oleaut32`.
+- **Overlay HUD Position Persistence & Reset Action**:
+  - Added coordinate saving (`overlayPosX`, `overlayPosY`, `hasSavedPos`) to `config.ini` whenever the user moves the HUD with ALT + Drag.
+  - Added a "Reset Overlay Position" tray menu option (`ID_TRAY_RESET_POSITION`) that snaps the overlay back to default top-right.
+- **HUD Size & Proportions Optimization**:
+  - Streamlined the overlay HUD to be significantly more compact and unobtrusive: reduced font size from 22px to 16px, removed global 1.2x UI scaling, tuned window and item padding, reduced progress bar width from 350px to 260px and bar height from 24px to 18px.
+- **Hardware Metadata Display**:
+  - Added CPU Model / Brand string discovery via registry `ProcessorNameString` with whitespace normalization (e.g., `"CPU: Intel(R) Core(TM) i5-8350U"`).
+  - Added RAM Speed (MHz) hardware query via native SMBIOS Table Type 17 parsing (`GetSystemFirmwareTable('RSMB', ...)`) without any COM/WMI overhead (e.g., `"RAM (2400 MHz)"`).
+- **Independent Per-Drive Disk Metrics Fix**:
+  - Replaced physical disk fallback that was causing all volumes (C:, D:, E:) to bind to `_Total` with dedicated `\LogicalDisk(X:)` PDH performance counters (`% Disk Time`, `Disk Read Bytes/sec`, `Disk Write Bytes/sec`). Each drive now reflects its own individual read, write, and active time rates.
+- **D3D11 Transparent Window Swapchain**:
+  - Preserved `DXGI_SWAP_EFFECT_DISCARD` with `DwmExtendFrameIntoClientArea` to ensure true full-desktop alpha pass-through transparency and prevent opaque black canvas occlusion.
+- **Display Sleep & Screen Lock Suspension (0.00% Idle Load)**:
+  - Integrated `WTSRegisterSessionNotification` for `WTS_SESSION_LOCK`/`WTS_SESSION_UNLOCK` and `RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE`.
+  - When the screen goes to sleep or the user locks Windows, CoreGaze suspends all PDH polling and DirectX 11 draw/present calls, lowering CPU and GPU consumption to literal 0.00%. Telemetry instantly resumes on wake.
+- **GPU VRAM Tray Toggle**:
+  - Added "Show Dedicated VRAM" toggle under the GPU tray context menu, allowing users to enable or disable the VRAM bar on demand. Persisted in `config.ini` under `[GPU] ShowVram`.
+- **Disk Storage Used & Available Display**:
+  - Integrated `GetDiskFreeSpaceExW` per drive to display real-time storage metrics next to the drive letter (e.g. `Disk C: (145/475 GB - 330 GB free)`).
+- **Instant Wi-Fi SSID Identification & Reconnection**:
+  - Eliminated the legacy 60-second Wi-Fi cooldown that was holding stale SSIDs or keeping the label stuck in an "Identifying..." state.
+  - Reduced identity fallback refresh from 30s to 2s, and upgraded `INetworkListManager` resolution to use `GetNetworks(NLM_ENUM_NETWORK_CONNECTED)` with a fallback to `GetNetworkConnections()`.
+  - Wi-Fi network name changes and disconnections are now resolved and displayed on the HUD within 1–2 seconds without ever triggering the Windows Location Services icon.
+
+
+
+

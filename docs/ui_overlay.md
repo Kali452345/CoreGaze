@@ -27,8 +27,8 @@ The HUD is rendered with Dear ImGui on a transparent, click-through DX11 surface
 - One row per selected drive.
 - Row payload includes:
   - active percent
-  - read throughput (adaptive `Kbps` / `Mbps`)
-  - write throughput (adaptive `Kbps` / `Mbps`)
+  - read throughput (adaptive `KB/s` / `MB/s` / `GB/s`)
+  - write throughput (adaptive `KB/s` / `MB/s` / `GB/s`)
   - fallback marker when drive->physical mapping falls back to `_Total`
 
 ## Network
@@ -36,6 +36,7 @@ The HUD is rendered with Dear ImGui on a transparent, click-through DX11 surface
 - Network name is rendered next to the `Network` label (not inside the progress bar payload).
 - Primary payload is always shown as spacing-aware RX/TX side-by-side mini bars (`v` for download and `^` for upload).
 - Optional secondary row is shown only when enabled and available.
+- Network mini bars now use adaptive hysteresis scaling per stream (primary/secondary down/up) instead of a fixed 1000 Mbps denominator, improving visibility for common ranges like 25-200 Mbps while limiting jitter.
 
 ## GPU
 - Row layout depends on GPU display mode:

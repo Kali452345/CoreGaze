@@ -2,116 +2,146 @@ param(
     [string]$InnoCompilerPath = "",
     [string]$InstallerScriptPath = "$PSScriptRoot\..\installer\CoreGaze.iss",
     [switch]$PerUserInstall,
-    [switch]$SkipVcRedistDownload,
-    [switch]$ExcludeVcRedistBundle,
-    [string]$VcRedistPath = "$PSScriptRoot\..\installer\prereqs\vc_redist.x64.exe"
+    [switch]$BuildFirst,
+    [string]$Version = "1.0.0"
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# ─── Helper: Resolve ISCC.exe ─────────────────────────────────────────────────
 function Resolve-InnoCompilerPath {
     param([string]$RequestedPath)
 
     if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
-        $command = Get-Command -Name $RequestedPath -ErrorAction SilentlyContinue
-        if ($null -ne $command) {
-            return $command.Source
-        }
-
-        $resolvedRequestedPath = Resolve-Path -Path $RequestedPath -ErrorAction SilentlyContinue
-        if ($null -ne $resolvedRequestedPath) {
-            return $resolvedRequestedPath.Path
-        }
-
+        if (Test-Path $RequestedPath) { return (Resolve-Path $RequestedPath).Path }
         throw "Inno Setup compiler not found at '$RequestedPath'."
     }
 
-    $pathCommand = Get-Command -Name "iscc.exe" -ErrorAction SilentlyContinue
-    if ($null -ne $pathCommand) {
-        return $pathCommand.Source
+    # 1. PATH
+    $cmd = Get-Command "iscc.exe" -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # 2. Known install locations
+    $candidates = @(
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        "C:\Program Files\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
     }
 
+    # 3. Registry scan
     $uninstallRoots = @(
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
         "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
     )
-
     foreach ($root in $uninstallRoots) {
-        $entries = @(Get-ItemProperty -Path $root -ErrorAction SilentlyContinue)
-        foreach ($entry in $entries) {
-            if ($null -eq $entry.DisplayName -or $entry.DisplayName -notlike "Inno Setup*") {
-                continue
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($entry.InstallLocation)) {
-                $candidateFromInstallLocation = Join-Path -Path $entry.InstallLocation -ChildPath "ISCC.exe"
-                if (Test-Path -Path $candidateFromInstallLocation) {
-                    return (Resolve-Path -Path $candidateFromInstallLocation).Path
-                }
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($entry.DisplayIcon)) {
-                $candidateFromDisplayIcon = Join-Path -Path (Split-Path -Path $entry.DisplayIcon -Parent) -ChildPath "ISCC.exe"
-                if (Test-Path -Path $candidateFromDisplayIcon) {
-                    return (Resolve-Path -Path $candidateFromDisplayIcon).Path
+        foreach ($entry in @(Get-ItemProperty -Path $root -ErrorAction SilentlyContinue)) {
+            if ($null -eq $entry.DisplayName -or $entry.DisplayName -notlike "Inno Setup*") { continue }
+            foreach ($prop in @("InstallLocation", "DisplayIcon")) {
+                $base = $entry.$prop
+                if (-not [string]::IsNullOrWhiteSpace($base)) {
+                    $candidate = Join-Path (Split-Path $base -Parent) "ISCC.exe"
+                    if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
                 }
             }
         }
     }
 
-    throw "Inno Setup compiler not found. Install Inno Setup and ensure iscc.exe is available in PATH or pass -InnoCompilerPath."
+    return $null
 }
 
-function Ensure-VcRedistBootstrap {
-    param([string]$OutputPath)
-
-    $resolvedOutputDirectory = Split-Path -Path $OutputPath -Parent
-    if (-not (Test-Path -Path $resolvedOutputDirectory)) {
-        New-Item -Path $resolvedOutputDirectory -ItemType Directory -Force | Out-Null
+# ─── Optional: auto-install Inno Setup via winget ─────────────────────────────
+function Install-InnoSetup {
+    $winget = Get-Command "winget" -ErrorAction SilentlyContinue
+    if ($null -eq $winget) {
+        throw "winget not found. Please install Inno Setup manually from https://jrsoftware.org/isdl.php"
     }
 
-    $downloadUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-    Write-Host "Downloading Visual C++ Runtime bootstrapper to '$OutputPath'..."
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $OutputPath
+    Write-Host "Inno Setup not found - installing via winget..."
+    & winget install --id JRSoftware.InnoSetup --exact --accept-package-agreements --accept-source-agreements --silent
+    if ($LASTEXITCODE -ne 0) {
+        throw "winget failed to install Inno Setup (exit code $LASTEXITCODE)."
+    }
+    Write-Host "Inno Setup installed successfully."
 }
 
-$resolvedScriptPath = Resolve-Path -Path $InstallerScriptPath -ErrorAction SilentlyContinue
-if ($null -eq $resolvedScriptPath) {
-    Write-Error "Installer script not found at path: $InstallerScriptPath"
+# ─── Optional: build CoreGaze.exe first ───────────────────────────────────────
+if ($BuildFirst.IsPresent) {
+    Write-Host "Building CoreGaze.exe..."
+    $buildScript = Join-Path $PSScriptRoot "build-release.ps1"
+    & $buildScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Build failed with exit code $LASTEXITCODE"
+        exit $LASTEXITCODE
+    }
+}
+
+# ─── Resolve CoreGaze.exe ─────────────────────────────────────────────────────
+$buildDir = Join-Path $PSScriptRoot "..\build"
+$exePath  = Join-Path $buildDir "CoreGaze.exe"
+if (-not (Test-Path $exePath)) {
+    Write-Error "CoreGaze.exe not found at '$exePath'. Run build-release.ps1 first, or pass -BuildFirst."
     exit 1
 }
 
-if (-not $SkipVcRedistDownload.IsPresent -and -not $ExcludeVcRedistBundle.IsPresent) {
-    if (-not (Test-Path -Path $VcRedistPath)) {
-        Ensure-VcRedistBootstrap -OutputPath $VcRedistPath
-    }
-    else {
-        Write-Host "Using existing Visual C++ Runtime bootstrapper at '$VcRedistPath'."
+# ─── Resolve ISCC.exe (auto-install if missing) ───────────────────────────────
+$iscc = Resolve-InnoCompilerPath -RequestedPath $InnoCompilerPath
+
+if ($null -eq $iscc) {
+    Install-InnoSetup
+
+    # Refresh PATH for newly installed binaries
+    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("PATH", "User")
+
+    $iscc = Resolve-InnoCompilerPath -RequestedPath ""
+    if ($null -eq $iscc) {
+        Write-Error "Inno Setup installed but ISCC.exe still not found. Please open a new terminal and retry."
+        exit 1
     }
 }
 
-try {
-    $resolvedCompilerPath = Resolve-InnoCompilerPath -RequestedPath $InnoCompilerPath
-}
-catch {
-    Write-Error $_.Exception.Message
+Write-Host "Using Inno Setup compiler: $iscc"
+
+# ─── Resolve .iss script ──────────────────────────────────────────────────────
+$issPath = Resolve-Path $InstallerScriptPath -ErrorAction SilentlyContinue
+if ($null -eq $issPath) {
+    Write-Error "Installer script not found at: $InstallerScriptPath"
     exit 1
 }
 
+# ─── Create output directory ──────────────────────────────────────────────────
+$outDir = Join-Path $buildDir "installer"
+New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+# ─── Compile ──────────────────────────────────────────────────────────────────
 $compilerArgs = @()
-if ($PerUserInstall.IsPresent) {
-    $compilerArgs += "/DPerUserInstall=1"
-}
-if ($ExcludeVcRedistBundle.IsPresent) {
-    $compilerArgs += "/DNoVcRedistBundle"
-}
-$compilerArgs += $resolvedScriptPath.Path
+if ($PerUserInstall.IsPresent) { $compilerArgs += "/DPerUserInstall=1" }
+# MinGW builds statically link the CRT - no VC++ Redist needed
+$compilerArgs += "/DNoVcRedistBundle"
+$compilerArgs += "/DMyAppVersion=$Version"
+$compilerArgs += $issPath.Path
 
-& $resolvedCompilerPath @compilerArgs
+Write-Host "Compiling installer..."
+& $iscc @compilerArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Inno Setup compilation failed with exit code $LASTEXITCODE"
     exit $LASTEXITCODE
 }
 
-$installMode = if ($PerUserInstall.IsPresent) { "per-user" } else { "machine-wide" }
-$vcBundleMode = if ($ExcludeVcRedistBundle.IsPresent) { "without VC++ runtime bundle" } else { "with VC++ runtime bundle" }
-Write-Host "Installer build completed successfully ($installMode mode, $vcBundleMode)."
+$installerGlob = Join-Path $outDir "CoreGaze-Setup-*.exe"
+$installerFile = Get-Item $installerGlob -ErrorAction SilentlyContinue | Select-Object -Last 1
+if ($installerFile) {
+    $sizeMB = [math]::Round($installerFile.Length / 1MB, 2)
+    Write-Host ""
+    Write-Host "=== Installer ready ===" -ForegroundColor Green
+    Write-Host "  Path : $($installerFile.FullName)" -ForegroundColor Cyan
+    Write-Host "  Size : $sizeMB MB" -ForegroundColor Cyan
+} else {
+    Write-Host "Installer compiled successfully."
+}

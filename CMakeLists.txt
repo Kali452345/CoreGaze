@@ -64,7 +64,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dbghelp
     pdh
     iphlpapi
-    wlanapi
+    ole32
+    oleaut32
+    wtsapi32
     ws2_32
 )
 

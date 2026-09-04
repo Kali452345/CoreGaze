@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <windows.h>
 #include <pdh.h>
 #include <pdhmsg.h>
@@ -50,8 +51,12 @@ struct DiskMetricsSnapshot {
     int physicalDiskIndex;
     bool fallbackTotal;
     float activePercent;
-    float readMbps;
-    float writeMbps;
+    float readKBps;
+    float writeKBps;
+    float usedGB;
+    float totalGB;
+    float freeGB;
+    bool capacityAvailable;
 };
 
 struct NetworkMetricsSnapshot {
@@ -93,6 +98,8 @@ public:
     void SetNetworkDisplayMode(DWORD networkDisplayMode);
     DWORD GetNetworkDisplayMode() const { return m_networkDisplayMode; }
     void RefreshNetworkIdentityNow();
+    void RefreshDiskTopologyNow();
+    void RequestDiskTopologyRefresh();
 
     UINT GetGPUAdapterCount() const { return m_gpuAdapterCount; }
     const char* GetGPUAdapterNameByIndex(UINT index) const;
@@ -110,8 +117,10 @@ public:
     bool HasSecondaryNetworkMetrics() const { return m_hasSecondaryNetworkMetrics; }
 
     // Getters for the HUD
+    const char* GetCPUName() const { return m_cpuName; }
     float GetCPUUsage() const { return m_cpuUsage; }
     float GetCPUGHz() const { return m_cpuGHz; }
+    DWORD GetRAMSpeedMHz() const { return m_ramSpeedMHz; }
     float GetRAMUsedGB() const { return m_ramUsedGB; }
     float GetRAMTotalGB() const { return m_ramTotalGB; }
     float GetRAMUsagePercent() const { return m_ramUsagePercent; }
@@ -155,8 +164,12 @@ private:
         PDH_HCOUNTER readCounter;
         PDH_HCOUNTER writeCounter;
         float activePercent;
-        float readMbps;
-        float writeMbps;
+        float readKBps;
+        float writeKBps;
+        float usedGB;
+        float totalGB;
+        float freeGB;
+        bool capacityAvailable;
     };
 
     struct NetworkAdapterSlot {
@@ -169,6 +182,7 @@ private:
         char adapterName[128];
         char ssid[64];
         char displayName[192];
+        ULONGLONG lastSsidQueryTick;
     };
 
     struct NetworkDeltaState {
@@ -182,9 +196,14 @@ private:
     // Timing mechanics
     ULONGLONG m_lastUpdateTime;
     ULONGLONG m_lastNetworkIdentityRefresh;
+    std::atomic<bool> m_networkIdentityRefreshRequested;
+    std::atomic<bool> m_networkSsidRefreshRequested;
+    std::atomic<bool> m_networkCallbacksEnabled;
+    std::atomic<bool> m_diskTopologyRefreshRequested;
     DWORD m_pollingIntervalMs;
     DWORD m_enabledMetricsMask;
     DWORD m_diskSelectionMask;
+    DWORD m_cachedLogicalDrivesMask;
 
     DWORD m_gpuDisplayMode;
     DWORD m_selectedGpuAdapterIndex;
@@ -197,8 +216,10 @@ private:
     DWORD m_networkDisplayMode;
 
     // Cache metrics
+    char m_cpuName[64];
     float m_cpuUsage;
     float m_cpuGHz;
+    DWORD m_ramSpeedMHz;
     float m_ramUsedGB;
     float m_ramTotalGB;
     float m_ramUsagePercent;
@@ -226,6 +247,10 @@ private:
     NetworkDeltaState m_primaryDeltaState;
     NetworkDeltaState m_secondaryDeltaState;
 
+    HANDLE m_networkAddressChangeHandle;
+    HANDLE m_networkAddressChangeWaitHandle;
+    OVERLAPPED m_networkAddressChangeOverlapped;
+
     // PDH Handles
     PDH_HQUERY m_pdhQuery;
     PDH_HCOUNTER m_pdhCpuCounter;
@@ -243,6 +268,12 @@ private:
     void RefreshNetworkIdentity();
     void PollNetworkThroughput();
     void SyncLegacyGpuFields();
+    void InitializeNetworkNotifications();
+    void ShutdownNetworkNotifications();
+    void ArmNetworkAddressChangeNotification();
+    void RequestNetworkIdentityRefresh();
+
+    static VOID CALLBACK OnNetworkAddressChangeWaitCallback(PVOID context, BOOLEAN timerOrWaitFired);
 
     void RebuildDiskCounters();
     void ClearDiskCounterHandles();
@@ -258,10 +289,12 @@ private:
     int ResolveAutoPrimaryNetworkSlot() const;
     int ResolveAutoSecondaryNetworkSlot(int primarySlot) const;
     void ResetNetworkDeltaState(NetworkDeltaState* state);
-    bool TryQueryWifiSsidForLuid(ULONGLONG interfaceLuidValue, char* ssidBuffer, int ssidBufferSize) const;
+    bool TryQueryConnectedNetworkName(char* nameBuffer, int nameBufferSize) const;
     void BuildNetworkDisplayName(const NetworkAdapterSlot* adapter, char* output, int outputSize) const;
     void ClearNetworkSnapshots();
     bool EnsurePdhBuffer(BYTE*& buffer, DWORD& bufferCapacity, DWORD requiredSize);
     static void CopyWideToUtf8(const wchar_t* source, char* destination, int destinationSize);
     static bool ContainsIgnoreCase(const char* haystack, const char* needle);
+    static void QueryCpuName(char* outName, int outSize);
+    static DWORD QueryRamSpeedMHz();
 };

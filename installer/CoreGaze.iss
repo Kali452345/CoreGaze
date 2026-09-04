@@ -10,11 +10,19 @@
   #define PerUserInstall 0
 #endif
 
-#ifexist "..\build\CoreGaze.exe"
-  #define MyAppVersion GetVersionNumbersString("..\build\CoreGaze.exe")
-#else
-  #define MyAppVersion "1.0.0.0"
+; MinGW builds link the C++ runtime statically so no VC++ Redist is required.
+; Override with /DIncludeVcRedist=1 on the command line only if switching to MSVC.
+#ifndef IncludeVcRedist
+  #define NoVcRedistBundle
 #endif
+
+#ifdef NoVcRedistBundle
+  #define SetupSuffix ""
+#else
+  #define SetupSuffix "-vcredist"
+#endif
+
+#define MyAppVersion "1.0.0"
 
 [Setup]
 AppId={{9D12F5E7-AEF7-4A3C-93F3-2AABFD6130D7}}
@@ -41,7 +49,7 @@ AppUpdatesURL={#MyAppUpdatesURL}
 AppContact={#MyAppContact}
 DisableProgramGroupPage=yes
 OutputDir=..\build\installer
-OutputBaseFilename=CoreGaze-Setup-{#MyAppVersion}
+OutputBaseFilename=CoreGaze-Setup-{#MyAppVersion}{#SetupSuffix}
 SetupIconFile=..\CoreGaze.ico
 Compression=lzma
 SolidCompression=yes

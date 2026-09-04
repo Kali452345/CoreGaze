@@ -4,8 +4,7 @@
 #include <dxgi1_4.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
-#include <wlanapi.h>
-#include <windot11.h>
+#include <netlistmgr.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +13,8 @@
 
 static const float kBytesToGB = 1.0f / (1024.0f * 1024.0f * 1024.0f);
 static const DWORD kAllDriveSelectionMask = 0x03FFFFFFu;
-static const ULONGLONG kNetworkIdentityRefreshMs = 10000;
+static const ULONGLONG kNetworkIdentityFallbackRefreshMs = 2000;
+static const ULONGLONG kNetworkIdentityEventDebounceMs = 500;
 
 static DWORD ClampPollingIntervalMs(DWORD pollingIntervalMs) {
     if (pollingIntervalMs < 500) {
@@ -132,9 +132,14 @@ bool SystemMonitor::EnsurePdhBuffer(BYTE*& buffer, DWORD& bufferCapacity, DWORD 
 SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
     : m_lastUpdateTime(0),
       m_lastNetworkIdentityRefresh(0),
+      m_networkIdentityRefreshRequested(false),
+      m_networkSsidRefreshRequested(false),
+      m_networkCallbacksEnabled(false),
+      m_diskTopologyRefreshRequested(false),
       m_pollingIntervalMs(1000),
       m_enabledMetricsMask(SYSTEM_METRIC_ALL),
       m_diskSelectionMask(kAllDriveSelectionMask),
+      m_cachedLogicalDrivesMask(0),
       m_gpuDisplayMode(GPU_DISPLAY_TARGETED),
       m_selectedGpuAdapterIndex(0),
       m_gpuActiveAdapterIndex(0),
@@ -145,6 +150,7 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_networkDisplayMode(NETWORK_DISPLAY_RX_TX),
       m_cpuUsage(0.0f),
       m_cpuGHz(0.0f),
+      m_ramSpeedMHz(0),
       m_ramUsedGB(0.0f),
       m_ramTotalGB(0.0f),
       m_ramUsagePercent(0.0f),
@@ -155,6 +161,9 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_primaryNetworkSlot(-1),
       m_secondaryNetworkSlot(-1),
       m_hasSecondaryNetworkMetrics(false),
+    m_networkAddressChangeHandle(NULL),
+    m_networkAddressChangeWaitHandle(NULL),
+    m_networkAddressChangeOverlapped{},
       m_pdhQuery(NULL),
       m_pdhCpuCounter(NULL),
       m_pdhCpuPerfCounter(NULL),
@@ -165,6 +174,10 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_pdhGpuBuffer(NULL),
       m_pdhGpuBufferSize(0)
 {
+    m_cpuName[0] = '\0';
+    QueryCpuName(m_cpuName, sizeof(m_cpuName));
+    m_ramSpeedMHz = QueryRamSpeedMHz();
+
     ZeroMemory(&m_legacyGpuDisplay, sizeof(m_legacyGpuDisplay));
     m_legacyGpuDisplay.adapterIndex = 0;
     snprintf(m_legacyGpuDisplay.adapterName, sizeof(m_legacyGpuDisplay.adapterName), "Unknown GPU");
@@ -198,8 +211,8 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         m_driveCounters[i].readCounter = NULL;
         m_driveCounters[i].writeCounter = NULL;
         m_driveCounters[i].activePercent = 0.0f;
-        m_driveCounters[i].readMbps = 0.0f;
-        m_driveCounters[i].writeMbps = 0.0f;
+        m_driveCounters[i].readKBps = 0.0f;
+        m_driveCounters[i].writeKBps = 0.0f;
     }
 
     for (UINT i = 0; i < kMaxNetworkAdapters; ++i) {
@@ -212,11 +225,14 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         m_networkAdapters[i].adapterName[0] = '\0';
         m_networkAdapters[i].ssid[0] = '\0';
         m_networkAdapters[i].displayName[0] = '\0';
+        m_networkAdapters[i].lastSsidQueryTick = 0;
     }
 
     ResetNetworkDeltaState(&m_primaryDeltaState);
     ResetNetworkDeltaState(&m_secondaryDeltaState);
     ClearNetworkSnapshots();
+
+    InitializeNetworkNotifications();
 
     InitializeGpuMonitoring(d3dDevice);
 
@@ -246,14 +262,15 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         PdhCollectQueryData(m_pdhQuery);
     }
 
-    RefreshNetworkIdentity();
-    m_lastNetworkIdentityRefresh = GetTickCount64();
+    RefreshNetworkIdentityNow();
 
     m_lastUpdateTime = GetTickCount64();
     PollMetrics();
 }
 
 SystemMonitor::~SystemMonitor() {
+    ShutdownNetworkNotifications();
+
     ClearDiskCounterHandles();
 
     for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
@@ -358,6 +375,94 @@ void SystemMonitor::SetNetworkDisplayMode(DWORD networkDisplayMode) {
 void SystemMonitor::RefreshNetworkIdentityNow() {
     RefreshNetworkIdentity();
     m_lastNetworkIdentityRefresh = GetTickCount64();
+    m_networkIdentityRefreshRequested.store(false, std::memory_order_relaxed);
+    m_networkSsidRefreshRequested.store(false, std::memory_order_relaxed);
+    ArmNetworkAddressChangeNotification();
+}
+
+void SystemMonitor::RefreshDiskTopologyNow() {
+    m_diskTopologyRefreshRequested.store(false, std::memory_order_relaxed);
+    RebuildDiskCounters();
+}
+
+void SystemMonitor::RequestDiskTopologyRefresh() {
+    m_diskTopologyRefreshRequested.store(true, std::memory_order_relaxed);
+}
+
+void SystemMonitor::InitializeNetworkNotifications() {
+    m_networkCallbacksEnabled.store(true, std::memory_order_relaxed);
+
+    ZeroMemory(&m_networkAddressChangeOverlapped, sizeof(m_networkAddressChangeOverlapped));
+    m_networkAddressChangeHandle = NULL;
+    m_networkAddressChangeWaitHandle = NULL;
+    m_networkAddressChangeOverlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (m_networkAddressChangeOverlapped.hEvent != NULL) {
+        if (RegisterWaitForSingleObject(
+                &m_networkAddressChangeWaitHandle,
+                m_networkAddressChangeOverlapped.hEvent,
+                &SystemMonitor::OnNetworkAddressChangeWaitCallback,
+                this,
+                INFINITE,
+                0) == FALSE) {
+            CloseHandle(m_networkAddressChangeOverlapped.hEvent);
+            m_networkAddressChangeOverlapped.hEvent = NULL;
+        } else {
+            ArmNetworkAddressChangeNotification();
+        }
+    }
+}
+
+void SystemMonitor::ShutdownNetworkNotifications() {
+    m_networkCallbacksEnabled.store(false, std::memory_order_relaxed);
+
+    if (m_networkAddressChangeWaitHandle != NULL) {
+        UnregisterWaitEx(m_networkAddressChangeWaitHandle, INVALID_HANDLE_VALUE);
+        m_networkAddressChangeWaitHandle = NULL;
+    }
+
+    if (m_networkAddressChangeHandle != NULL && m_networkAddressChangeOverlapped.hEvent != NULL) {
+        CancelIPChangeNotify(&m_networkAddressChangeOverlapped);
+        m_networkAddressChangeHandle = NULL;
+    }
+
+    if (m_networkAddressChangeOverlapped.hEvent != NULL) {
+        CloseHandle(m_networkAddressChangeOverlapped.hEvent);
+        m_networkAddressChangeOverlapped.hEvent = NULL;
+    }
+}
+
+void SystemMonitor::ArmNetworkAddressChangeNotification() {
+    if (m_networkAddressChangeOverlapped.hEvent == NULL) {
+        return;
+    }
+
+    HANDLE addressChangeEvent = m_networkAddressChangeOverlapped.hEvent;
+    if (m_networkAddressChangeHandle != NULL) {
+        CancelIPChangeNotify(&m_networkAddressChangeOverlapped);
+        m_networkAddressChangeHandle = NULL;
+    }
+
+    ZeroMemory(&m_networkAddressChangeOverlapped, sizeof(m_networkAddressChangeOverlapped));
+    m_networkAddressChangeOverlapped.hEvent = addressChangeEvent;
+    ResetEvent(addressChangeEvent);
+
+    DWORD notifyResult = NotifyAddrChange(&m_networkAddressChangeHandle, &m_networkAddressChangeOverlapped);
+    if (notifyResult != NO_ERROR && notifyResult != ERROR_IO_PENDING) {
+        m_networkAddressChangeHandle = NULL;
+    }
+}
+
+void SystemMonitor::RequestNetworkIdentityRefresh() {
+    m_networkIdentityRefreshRequested.store(true, std::memory_order_relaxed);
+}
+
+VOID CALLBACK SystemMonitor::OnNetworkAddressChangeWaitCallback(PVOID context, BOOLEAN) {
+    SystemMonitor* monitor = (SystemMonitor*)context;
+    if (monitor == NULL || !monitor->m_networkCallbacksEnabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    monitor->m_networkIdentityRefreshRequested.store(true, std::memory_order_relaxed);
 }
 
 const char* SystemMonitor::GetGPUAdapterNameByIndex(UINT index) const {
@@ -454,8 +559,12 @@ bool SystemMonitor::GetSelectedDiskMetric(UINT rowIndex, DiskMetricsSnapshot* ou
             outSnapshot->physicalDiskIndex = m_driveCounters[i].physicalDiskIndex;
             outSnapshot->fallbackTotal = m_driveCounters[i].fallbackTotal;
             outSnapshot->activePercent = m_driveCounters[i].activePercent;
-            outSnapshot->readMbps = m_driveCounters[i].readMbps;
-            outSnapshot->writeMbps = m_driveCounters[i].writeMbps;
+            outSnapshot->readKBps = m_driveCounters[i].readKBps;
+            outSnapshot->writeKBps = m_driveCounters[i].writeKBps;
+            outSnapshot->usedGB = m_driveCounters[i].usedGB;
+            outSnapshot->totalGB = m_driveCounters[i].totalGB;
+            outSnapshot->freeGB = m_driveCounters[i].freeGB;
+            outSnapshot->capacityAvailable = m_driveCounters[i].capacityAvailable;
             return true;
         }
 
@@ -499,9 +608,14 @@ void SystemMonitor::PollMetrics() {
 
     if (pollNetwork) {
         ULONGLONG now = GetTickCount64();
-        if (m_lastNetworkIdentityRefresh == 0 || (now - m_lastNetworkIdentityRefresh) >= kNetworkIdentityRefreshMs) {
-            RefreshNetworkIdentity();
-            m_lastNetworkIdentityRefresh = now;
+        const bool periodicRefreshDue = (m_lastNetworkIdentityRefresh == 0) || ((now - m_lastNetworkIdentityRefresh) >= kNetworkIdentityFallbackRefreshMs);
+        const bool eventRefreshPending = m_networkIdentityRefreshRequested.load(std::memory_order_relaxed) ||
+            m_networkSsidRefreshRequested.load(std::memory_order_relaxed);
+        const bool quickRefreshDue = eventRefreshPending &&
+            (m_lastNetworkIdentityRefresh == 0 || (now - m_lastNetworkIdentityRefresh) >= kNetworkIdentityEventDebounceMs);
+
+        if (periodicRefreshDue || quickRefreshDue) {
+            RefreshNetworkIdentityNow();
         }
         PollNetworkThroughput();
     } else {
@@ -531,6 +645,14 @@ void SystemMonitor::PollMetrics() {
     }
 
     const bool needsPdh = pollCpu || pollDisk || pollGpu;
+    if (pollDisk) {
+        const DWORD currentDriveMask = GetLogicalDrives();
+        const bool topologyRefreshRequested = m_diskTopologyRefreshRequested.exchange(false, std::memory_order_relaxed);
+        if (topologyRefreshRequested || currentDriveMask != m_cachedLogicalDrivesMask) {
+            RebuildDiskCounters();
+        }
+    }
+
     if (m_pdhQuery != NULL && needsPdh) {
         PdhCollectQueryData(m_pdhQuery);
 
@@ -561,8 +683,8 @@ void SystemMonitor::PollMetrics() {
                 }
 
                 m_driveCounters[i].activePercent = 0.0f;
-                m_driveCounters[i].readMbps = 0.0f;
-                m_driveCounters[i].writeMbps = 0.0f;
+                m_driveCounters[i].readKBps = 0.0f;
+                m_driveCounters[i].writeKBps = 0.0f;
 
                 if (m_driveCounters[i].activeCounter != NULL && PdhGetFormattedCounterValue(m_driveCounters[i].activeCounter, PDH_FMT_DOUBLE, NULL, &counterVal) == ERROR_SUCCESS) {
                     m_driveCounters[i].activePercent = (float)counterVal.doubleValue;
@@ -575,17 +697,26 @@ void SystemMonitor::PollMetrics() {
                 }
 
                 if (m_driveCounters[i].readCounter != NULL && PdhGetFormattedCounterValue(m_driveCounters[i].readCounter, PDH_FMT_DOUBLE, NULL, &counterVal) == ERROR_SUCCESS) {
-                    m_driveCounters[i].readMbps = (float)(counterVal.doubleValue * 8.0 / 1000000.0);
-                    if (m_driveCounters[i].readMbps < 0.0f) {
-                        m_driveCounters[i].readMbps = 0.0f;
+                    m_driveCounters[i].readKBps = (float)(counterVal.doubleValue / 1024.0);
+                    if (m_driveCounters[i].readKBps < 0.0f) {
+                        m_driveCounters[i].readKBps = 0.0f;
                     }
                 }
 
                 if (m_driveCounters[i].writeCounter != NULL && PdhGetFormattedCounterValue(m_driveCounters[i].writeCounter, PDH_FMT_DOUBLE, NULL, &counterVal) == ERROR_SUCCESS) {
-                    m_driveCounters[i].writeMbps = (float)(counterVal.doubleValue * 8.0 / 1000000.0);
-                    if (m_driveCounters[i].writeMbps < 0.0f) {
-                        m_driveCounters[i].writeMbps = 0.0f;
+                    m_driveCounters[i].writeKBps = (float)(counterVal.doubleValue / 1024.0);
+                    if (m_driveCounters[i].writeKBps < 0.0f) {
+                        m_driveCounters[i].writeKBps = 0.0f;
                     }
+                }
+
+                wchar_t rootPath[4] = { (wchar_t)(L'A' + i), L':', L'\\', L'\0' };
+                ULARGE_INTEGER freeBytesAvail = {}, totalBytes = {}, totalFreeBytes = {};
+                if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &totalFreeBytes) && totalBytes.QuadPart > 0) {
+                    m_driveCounters[i].totalGB = (float)((double)totalBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
+                    m_driveCounters[i].freeGB = (float)((double)totalFreeBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
+                    m_driveCounters[i].usedGB = m_driveCounters[i].totalGB - m_driveCounters[i].freeGB;
+                    m_driveCounters[i].capacityAvailable = true;
                 }
 
                 if (m_driveCounters[i].activePercent > m_diskUsage) {
@@ -604,8 +735,8 @@ void SystemMonitor::PollMetrics() {
         m_diskUsage = 0.0f;
         for (UINT i = 0; i < kMaxDriveLetters; ++i) {
             m_driveCounters[i].activePercent = 0.0f;
-            m_driveCounters[i].readMbps = 0.0f;
-            m_driveCounters[i].writeMbps = 0.0f;
+            m_driveCounters[i].readKBps = 0.0f;
+            m_driveCounters[i].writeKBps = 0.0f;
         }
     }
 
@@ -1029,8 +1160,12 @@ void SystemMonitor::ClearDiskCounterHandles() {
         m_driveCounters[i].fallbackTotal = false;
         m_driveCounters[i].pdhInstance[0] = L'\0';
         m_driveCounters[i].activePercent = 0.0f;
-        m_driveCounters[i].readMbps = 0.0f;
-        m_driveCounters[i].writeMbps = 0.0f;
+        m_driveCounters[i].readKBps = 0.0f;
+        m_driveCounters[i].writeKBps = 0.0f;
+        m_driveCounters[i].usedGB = 0.0f;
+        m_driveCounters[i].totalGB = 0.0f;
+        m_driveCounters[i].freeGB = 0.0f;
+        m_driveCounters[i].capacityAvailable = false;
     }
 }
 
@@ -1141,6 +1276,7 @@ void SystemMonitor::RebuildDiskCounters() {
     }
 
     const DWORD driveMask = GetLogicalDrives();
+    m_cachedLogicalDrivesMask = driveMask;
 
     for (UINT driveIndex = 0; driveIndex < kMaxDriveLetters; ++driveIndex) {
         const DWORD driveBit = (1u << driveIndex);
@@ -1153,7 +1289,8 @@ void SystemMonitor::RebuildDiskCounters() {
         }
 
         wchar_t rootPath[4] = { (wchar_t)(L'A' + driveIndex), L':', L'\\', L'\0' };
-        if (GetDriveTypeW(rootPath) != DRIVE_FIXED) {
+        const UINT driveType = GetDriveTypeW(rootPath);
+        if (driveType != DRIVE_FIXED && driveType != DRIVE_REMOVABLE) {
             continue;
         }
 
@@ -1163,8 +1300,20 @@ void SystemMonitor::RebuildDiskCounters() {
         slot->physicalDiskIndex = -1;
         slot->fallbackTotal = false;
         slot->activePercent = 0.0f;
-        slot->readMbps = 0.0f;
-        slot->writeMbps = 0.0f;
+        slot->readKBps = 0.0f;
+        slot->writeKBps = 0.0f;
+        slot->totalGB = 0.0f;
+        slot->usedGB = 0.0f;
+        slot->freeGB = 0.0f;
+        slot->capacityAvailable = false;
+
+        ULARGE_INTEGER freeBytesAvail = {}, totalBytes = {}, totalFreeBytes = {};
+        if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &totalFreeBytes) && totalBytes.QuadPart > 0) {
+            slot->totalGB = (float)((double)totalBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
+            slot->freeGB = (float)((double)totalFreeBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
+            slot->usedGB = slot->totalGB - slot->freeGB;
+            slot->capacityAvailable = true;
+        }
 
         const wchar_t driveLetter = (wchar_t)(L'A' + driveIndex);
         ResolveDriveToPhysicalDisk(driveLetter, &slot->physicalDiskIndex);
@@ -1192,7 +1341,26 @@ void SystemMonitor::RebuildDiskCounters() {
             }
         };
 
-        auto addCounterSet = [&](const wchar_t* pdhInstanceName) -> bool {
+        auto tryAddLogicalCounters = [&](wchar_t dl) -> bool {
+            wchar_t activePath[128] = {};
+            wchar_t readPath[128] = {};
+            wchar_t writePath[128] = {};
+            swprintf_s(activePath, L"\\LogicalDisk(%c:)\\%% Disk Time", dl);
+            swprintf_s(readPath, L"\\LogicalDisk(%c:)\\Disk Read Bytes/sec", dl);
+            swprintf_s(writePath, L"\\LogicalDisk(%c:)\\Disk Write Bytes/sec", dl);
+
+            if (PdhAddEnglishCounterW(m_pdhQuery, activePath, 0, &slot->activeCounter) == ERROR_SUCCESS &&
+                PdhAddEnglishCounterW(m_pdhQuery, readPath, 0, &slot->readCounter) == ERROR_SUCCESS &&
+                PdhAddEnglishCounterW(m_pdhQuery, writePath, 0, &slot->writeCounter) == ERROR_SUCCESS) {
+                swprintf_s(slot->pdhInstance, L"%c:", dl);
+                slot->fallbackTotal = false;
+                return true;
+            }
+            removePartialCounters();
+            return false;
+        };
+
+        auto tryAddPhysicalCounters = [&](const wchar_t* pdhInstanceName) -> bool {
             wchar_t activePath[128] = {};
             wchar_t readPath[128] = {};
             wchar_t writePath[128] = {};
@@ -1200,41 +1368,28 @@ void SystemMonitor::RebuildDiskCounters() {
             swprintf_s(readPath, L"\\PhysicalDisk(%ls)\\Disk Read Bytes/sec", pdhInstanceName);
             swprintf_s(writePath, L"\\PhysicalDisk(%ls)\\Disk Write Bytes/sec", pdhInstanceName);
 
-            if (PdhAddEnglishCounterW(m_pdhQuery, activePath, 0, &slot->activeCounter) != ERROR_SUCCESS) {
-                removePartialCounters();
-                return false;
+            if (PdhAddEnglishCounterW(m_pdhQuery, activePath, 0, &slot->activeCounter) == ERROR_SUCCESS &&
+                PdhAddEnglishCounterW(m_pdhQuery, readPath, 0, &slot->readCounter) == ERROR_SUCCESS &&
+                PdhAddEnglishCounterW(m_pdhQuery, writePath, 0, &slot->writeCounter) == ERROR_SUCCESS) {
+                return true;
             }
-
-            if (PdhAddEnglishCounterW(m_pdhQuery, readPath, 0, &slot->readCounter) != ERROR_SUCCESS) {
-                removePartialCounters();
-                return false;
-            }
-
-            if (PdhAddEnglishCounterW(m_pdhQuery, writePath, 0, &slot->writeCounter) != ERROR_SUCCESS) {
-                removePartialCounters();
-                return false;
-            }
-
-            return true;
+            removePartialCounters();
+            return false;
         };
 
-        if (!addCounterSet(slot->pdhInstance)) {
-            if (_wcsicmp(slot->pdhInstance, L"_Total") != 0) {
-                slot->fallbackTotal = true;
-                slot->physicalDiskIndex = -1;
-                wcscpy_s(slot->pdhInstance, L"_Total");
-                if (!addCounterSet(slot->pdhInstance)) {
-                    slot->selected = false;
-                    continue;
-                }
-            } else {
-                slot->selected = false;
-                continue;
-            }
-        }
-
-        if (_wcsicmp(slot->pdhInstance, L"_Total") == 0) {
+        if (tryAddLogicalCounters(driveLetter)) {
+            // Successfully bound to dedicated LogicalDisk counter for this drive letter
+            slot->fallbackTotal = false;
+        } else if (slot->pdhInstance[0] != L'\0' && _wcsicmp(slot->pdhInstance, L"_Total") != 0 && tryAddPhysicalCounters(slot->pdhInstance)) {
+            // Successfully bound to specific PhysicalDisk counter
+            slot->fallbackTotal = false;
+        } else if (tryAddPhysicalCounters(L"_Total")) {
+            // Generic fallback
+            wcscpy_s(slot->pdhInstance, L"_Total");
             slot->fallbackTotal = true;
+        } else {
+            slot->selected = false;
+            continue;
         }
     }
 
@@ -1343,67 +1498,89 @@ void SystemMonitor::ResetNetworkDeltaState(NetworkDeltaState* state) {
     state->lastSampleTimeMs = 0;
 }
 
-bool SystemMonitor::TryQueryWifiSsidForLuid(ULONGLONG interfaceLuidValue, char* ssidBuffer, int ssidBufferSize) const {
-    if (ssidBuffer == NULL || ssidBufferSize <= 0) {
+bool SystemMonitor::TryQueryConnectedNetworkName(char* nameBuffer, int nameBufferSize) const {
+    if (nameBuffer == NULL || nameBufferSize <= 0) {
         return false;
     }
 
-    ssidBuffer[0] = '\0';
+    nameBuffer[0] = '\0';
 
-    HANDLE wlanHandle = NULL;
-    DWORD negotiatedVersion = 0;
-    if (WlanOpenHandle(2, NULL, &negotiatedVersion, &wlanHandle) != ERROR_SUCCESS) {
+    INetworkListManager* pNLM = NULL;
+    HRESULT hr = CoCreateInstance(
+        CLSID_NetworkListManager, NULL, CLSCTX_ALL,
+        IID_INetworkListManager, (void**)&pNLM);
+    if (FAILED(hr) || pNLM == NULL) {
         return false;
     }
 
     bool success = false;
-    PWLAN_INTERFACE_INFO_LIST interfaceList = NULL;
-    if (WlanEnumInterfaces(wlanHandle, NULL, &interfaceList) == ERROR_SUCCESS && interfaceList != NULL) {
-        for (DWORD i = 0; i < interfaceList->dwNumberOfItems; ++i) {
-            WLAN_INTERFACE_INFO* interfaceInfo = &interfaceList->InterfaceInfo[i];
-            if (interfaceInfo->isState != wlan_interface_state_connected) {
-                continue;
-            }
 
-            if (interfaceLuidValue != 0) {
-                // Keep interfaceLuidValue in the signature for forward compatibility; on older stacks
-                // we select the currently connected WLAN interface when LUID mapping is unavailable.
-            }
+    // Method 1: GetNetworks(NLM_ENUM_NETWORK_CONNECTED) - direct connected network list
+    IEnumNetworks* pEnumNetworks = NULL;
+    hr = pNLM->GetNetworks(NLM_ENUM_NETWORK_CONNECTED, &pEnumNetworks);
+    if (SUCCEEDED(hr) && pEnumNetworks != NULL) {
+        INetwork* pNetwork = NULL;
+        ULONG fetched = 0;
+        while (pEnumNetworks->Next(1, &pNetwork, &fetched) == S_OK && fetched > 0 && pNetwork != NULL) {
+            BSTR bstrName = NULL;
+            hr = pNetwork->GetName(&bstrName);
+            if (SUCCEEDED(hr) && bstrName != NULL) {
+                char temp[128] = {};
+                CopyWideToUtf8(bstrName, temp, sizeof(temp));
+                SysFreeString(bstrName);
 
-            DWORD dataSize = 0;
-            WLAN_OPCODE_VALUE_TYPE opcodeType = wlan_opcode_value_type_invalid;
-            PWLAN_CONNECTION_ATTRIBUTES connectionAttributes = NULL;
-            if (WlanQueryInterface(
-                    wlanHandle,
-                    &interfaceInfo->InterfaceGuid,
-                    wlan_intf_opcode_current_connection,
-                    NULL,
-                    &dataSize,
-                    (PVOID*)&connectionAttributes,
-                    &opcodeType) == ERROR_SUCCESS && connectionAttributes != NULL) {
-                ULONG ssidLength = connectionAttributes->wlanAssociationAttributes.dot11Ssid.uSSIDLength;
-                if (ssidLength >= (ULONG)ssidBufferSize) {
-                    ssidLength = (ULONG)(ssidBufferSize - 1);
+                if (temp[0] != '\0' &&
+                    _stricmp(temp, "Unidentified network") != 0 &&
+                    _stricmp(temp, "Identifying...") != 0) {
+                    snprintf(nameBuffer, nameBufferSize, "%s", temp);
+                    success = true;
                 }
+            }
+            pNetwork->Release();
+            if (success) {
+                break;
+            }
+        }
+        pEnumNetworks->Release();
+    }
 
-                memcpy(ssidBuffer, connectionAttributes->wlanAssociationAttributes.dot11Ssid.ucSSID, ssidLength);
-                ssidBuffer[ssidLength] = '\0';
-                success = ssidLength > 0;
-                WlanFreeMemory(connectionAttributes);
+    // Method 2: Fallback to GetNetworkConnections()
+    if (!success) {
+        IEnumNetworkConnections* pEnumConnections = NULL;
+        hr = pNLM->GetNetworkConnections(&pEnumConnections);
+        if (SUCCEEDED(hr) && pEnumConnections != NULL) {
+            INetworkConnection* pConnection = NULL;
+            ULONG fetched = 0;
+            while (pEnumConnections->Next(1, &pConnection, &fetched) == S_OK && fetched > 0 && pConnection != NULL) {
+                INetwork* pNetwork = NULL;
+                hr = pConnection->GetNetwork(&pNetwork);
+                if (SUCCEEDED(hr) && pNetwork != NULL) {
+                    BSTR bstrName = NULL;
+                    hr = pNetwork->GetName(&bstrName);
+                    if (SUCCEEDED(hr) && bstrName != NULL) {
+                        char temp[128] = {};
+                        CopyWideToUtf8(bstrName, temp, sizeof(temp));
+                        SysFreeString(bstrName);
+
+                        if (temp[0] != '\0' &&
+                            _stricmp(temp, "Unidentified network") != 0 &&
+                            _stricmp(temp, "Identifying...") != 0) {
+                            snprintf(nameBuffer, nameBufferSize, "%s", temp);
+                            success = true;
+                        }
+                    }
+                    pNetwork->Release();
+                }
+                pConnection->Release();
                 if (success) {
                     break;
                 }
             }
-
-            if (connectionAttributes != NULL) {
-                WlanFreeMemory(connectionAttributes);
-            }
+            pEnumConnections->Release();
         }
-
-        WlanFreeMemory(interfaceList);
     }
 
-    WlanCloseHandle(wlanHandle, NULL);
+    pNLM->Release();
     return success;
 }
 
@@ -1414,7 +1591,7 @@ void SystemMonitor::BuildNetworkDisplayName(const NetworkAdapterSlot* adapter, c
 
     output[0] = '\0';
 
-    if (adapter == NULL || !adapter->valid) {
+    if (adapter == NULL || !adapter->valid || !adapter->connected) {
         snprintf(output, outputSize, "Disconnected");
         return;
     }
@@ -1424,10 +1601,10 @@ void SystemMonitor::BuildNetworkDisplayName(const NetworkAdapterSlot* adapter, c
         return;
     }
 
-    if (adapter->connected) {
-        snprintf(output, outputSize, "Wired");
+    if (adapter->isWifi) {
+        snprintf(output, outputSize, "Wi-Fi");
     } else {
-        snprintf(output, outputSize, "Disconnected");
+        snprintf(output, outputSize, "Wired");
     }
 }
 
@@ -1449,6 +1626,8 @@ void SystemMonitor::ClearNetworkSnapshots() {
 }
 
 void SystemMonitor::RefreshNetworkIdentity() {
+    m_networkSsidRefreshRequested.store(false, std::memory_order_relaxed);
+    const ULONGLONG now = GetTickCount64();
     const ULONG previousPrimaryIfIndex = m_primaryNetworkMetrics.ifIndex;
     const ULONG previousSecondaryIfIndex = m_secondaryNetworkMetrics.ifIndex;
 
@@ -1507,6 +1686,12 @@ void SystemMonitor::RefreshNetworkIdentity() {
                     }
 
                     slot->ssid[0] = '\0';
+                    slot->lastSsidQueryTick = 0;
+                    if (slot->isWifi && slot->connected) {
+                        if (TryQueryConnectedNetworkName(slot->ssid, (int)sizeof(slot->ssid))) {
+                            slot->lastSsidQueryTick = now;
+                        }
+                    }
                     BuildNetworkDisplayName(slot, slot->displayName, (int)sizeof(slot->displayName));
 
                     ++m_networkAdapterCount;
@@ -1540,9 +1725,6 @@ void SystemMonitor::RefreshNetworkIdentity() {
     m_primaryNetworkSlot = primarySlot;
 
     NetworkAdapterSlot* primaryAdapter = &m_networkAdapters[m_primaryNetworkSlot];
-    if (primaryAdapter->isWifi) {
-        TryQueryWifiSsidForLuid(primaryAdapter->interfaceLuidValue, primaryAdapter->ssid, (int)sizeof(primaryAdapter->ssid));
-    }
     BuildNetworkDisplayName(primaryAdapter, primaryAdapter->displayName, (int)sizeof(primaryAdapter->displayName));
 
     if (primaryAdapter->adapterName[0] != '\0') {
@@ -1575,9 +1757,6 @@ void SystemMonitor::RefreshNetworkIdentity() {
     if (secondarySlot >= 0 && secondarySlot < (int)m_networkAdapterCount) {
         m_secondaryNetworkSlot = secondarySlot;
         NetworkAdapterSlot* secondaryAdapter = &m_networkAdapters[m_secondaryNetworkSlot];
-        if (secondaryAdapter->isWifi) {
-            TryQueryWifiSsidForLuid(secondaryAdapter->interfaceLuidValue, secondaryAdapter->ssid, (int)sizeof(secondaryAdapter->ssid));
-        }
         BuildNetworkDisplayName(secondaryAdapter, secondaryAdapter->displayName, (int)sizeof(secondaryAdapter->displayName));
 
         m_secondaryNetworkMetrics.ifIndex = secondaryAdapter->ifIndex;
@@ -1609,6 +1788,8 @@ void SystemMonitor::RefreshNetworkIdentity() {
 }
 
 void SystemMonitor::PollNetworkThroughput() {
+    static const ULONGLONG kOctetCounterWrap = 0x100000000ULL;
+
     m_primaryNetworkMetrics.rxMbps = 0.0f;
     m_primaryNetworkMetrics.txMbps = 0.0f;
     m_primaryNetworkMetrics.totalMbps = 0.0f;
@@ -1618,6 +1799,7 @@ void SystemMonitor::PollNetworkThroughput() {
     m_secondaryNetworkMetrics.totalMbps = 0.0f;
 
     if (m_primaryNetworkSlot < 0 || m_primaryNetworkSlot >= (int)m_networkAdapterCount) {
+        RequestNetworkIdentityRefresh();
         return;
     }
 
@@ -1633,11 +1815,32 @@ void SystemMonitor::PollNetworkThroughput() {
         ifRow.dwIndex = snapshot->ifIndex;
         if (GetIfEntry(&ifRow) != NO_ERROR) {
             ResetNetworkDeltaState(deltaState);
+            snapshot->connected = false;
+            snapshot->rxMbps = 0.0f;
+            snapshot->txMbps = 0.0f;
+            snapshot->totalMbps = 0.0f;
+            RequestNetworkIdentityRefresh();
+            return;
+        }
+
+        const bool connectedNow = ifRow.dwOperStatus >= 4;
+        if (!connectedNow) {
+            if (snapshot->connected) {
+                RequestNetworkIdentityRefresh();
+            }
+
+            snapshot->connected = false;
+            ResetNetworkDeltaState(deltaState);
             snapshot->rxMbps = 0.0f;
             snapshot->txMbps = 0.0f;
             snapshot->totalMbps = 0.0f;
             return;
         }
+
+        if (!snapshot->connected) {
+            RequestNetworkIdentityRefresh();
+        }
+        snapshot->connected = true;
 
         if (!deltaState->valid || deltaState->ifIndex != snapshot->ifIndex || now <= deltaState->lastSampleTimeMs) {
             deltaState->valid = true;
@@ -1659,8 +1862,15 @@ void SystemMonitor::PollNetworkThroughput() {
             return;
         }
 
-        const ULONGLONG deltaInOctets = ifRow.dwInOctets >= deltaState->lastInOctets ? (ifRow.dwInOctets - deltaState->lastInOctets) : 0;
-        const ULONGLONG deltaOutOctets = ifRow.dwOutOctets >= deltaState->lastOutOctets ? (ifRow.dwOutOctets - deltaState->lastOutOctets) : 0;
+        const ULONGLONG currentInOctets = (ULONGLONG)ifRow.dwInOctets;
+        const ULONGLONG currentOutOctets = (ULONGLONG)ifRow.dwOutOctets;
+
+        const ULONGLONG deltaInOctets = currentInOctets >= deltaState->lastInOctets
+            ? (currentInOctets - deltaState->lastInOctets)
+            : (kOctetCounterWrap - deltaState->lastInOctets + currentInOctets);
+        const ULONGLONG deltaOutOctets = currentOutOctets >= deltaState->lastOutOctets
+            ? (currentOutOctets - deltaState->lastOutOctets)
+            : (kOctetCounterWrap - deltaState->lastOutOctets + currentOutOctets);
         const double elapsedSeconds = (double)elapsedMs / 1000.0;
 
         snapshot->rxMbps = (float)((deltaInOctets * 8.0) / 1000000.0 / elapsedSeconds);
@@ -1676,8 +1886,8 @@ void SystemMonitor::PollNetworkThroughput() {
 
         deltaState->valid = true;
         deltaState->ifIndex = snapshot->ifIndex;
-        deltaState->lastInOctets = ifRow.dwInOctets;
-        deltaState->lastOutOctets = ifRow.dwOutOctets;
+        deltaState->lastInOctets = currentInOctets;
+        deltaState->lastOutOctets = currentOutOctets;
         deltaState->lastSampleTimeMs = now;
     };
 
@@ -1686,3 +1896,103 @@ void SystemMonitor::PollNetworkThroughput() {
         updateSnapshot(&m_secondaryNetworkMetrics, &m_secondaryDeltaState);
     }
 }
+
+void SystemMonitor::QueryCpuName(char* outName, int outSize) {
+    if (outName == NULL || outSize <= 0) {
+        return;
+    }
+    outName[0] = '\0';
+
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        char rawName[128] = {};
+        DWORD dataSize = sizeof(rawName);
+        if (RegQueryValueExA(hKey, "ProcessorNameString", NULL, NULL, (LPBYTE)rawName, &dataSize) == ERROR_SUCCESS) {
+            const char* src = rawName;
+            while (*src == ' ' || *src == '\t') {
+                src++;
+            }
+
+            int dstIdx = 0;
+            bool lastWasSpace = false;
+            while (*src != '\0' && dstIdx < outSize - 1) {
+                if (*src == ' ' || *src == '\t') {
+                    if (!lastWasSpace) {
+                        outName[dstIdx++] = ' ';
+                        lastWasSpace = true;
+                    }
+                } else {
+                    outName[dstIdx++] = *src;
+                    lastWasSpace = false;
+                }
+                src++;
+            }
+
+            while (dstIdx > 0 && outName[dstIdx - 1] == ' ') {
+                dstIdx--;
+            }
+            outName[dstIdx] = '\0';
+        }
+        RegCloseKey(hKey);
+    }
+
+    if (outName[0] == '\0') {
+        snprintf(outName, outSize, "CPU");
+    }
+}
+
+DWORD SystemMonitor::QueryRamSpeedMHz() {
+    const DWORD signature = 0x52534D42; // 'RSMB'
+    const DWORD size = GetSystemFirmwareTable(signature, 0, NULL, 0);
+    if (size == 0) {
+        return 0;
+    }
+
+    BYTE* buffer = (BYTE*)malloc(size);
+    if (buffer == NULL) {
+        return 0;
+    }
+
+    if (GetSystemFirmwareTable(signature, 0, buffer, size) != size) {
+        free(buffer);
+        return 0;
+    }
+
+    DWORD maxRamSpeed = 0;
+    if (size > 8) {
+        const BYTE* ptr = buffer + 8;
+        const BYTE* end = buffer + size;
+        while (ptr + 4 <= end) {
+            BYTE type = ptr[0];
+            BYTE length = ptr[1];
+            if (length < 4 || ptr + length > end) {
+                break;
+            }
+
+            if (type == 17) { // Type 17: Memory Device (SMBIOS)
+                WORD speed = 0;
+                WORD configuredSpeed = 0;
+                if (length >= 23) {
+                    speed = *(const WORD*)(ptr + 0x15);
+                }
+                if (length >= 34) {
+                    configuredSpeed = *(const WORD*)(ptr + 0x20);
+                }
+                WORD effectiveSpeed = (configuredSpeed > 0 && configuredSpeed < 65535) ? configuredSpeed : speed;
+                if (effectiveSpeed > maxRamSpeed && effectiveSpeed < 65535) {
+                    maxRamSpeed = effectiveSpeed;
+                }
+            }
+
+            const BYTE* strPtr = ptr + length;
+            while (strPtr < end - 1 && !(strPtr[0] == 0 && strPtr[1] == 0)) {
+                strPtr++;
+            }
+            ptr = strPtr + 2;
+        }
+    }
+
+    free(buffer);
+    return maxRamSpeed;
+}
+

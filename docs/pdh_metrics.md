@@ -26,7 +26,7 @@ Disk handles are rebuilt only when disk selection changes.
 - Mapping fallback: if resolved instance is unreliable/unavailable, monitor uses `_Total` and marks the row as fallback.
 
 UI formatting note:
-- Read/write disk throughput is displayed in adaptive units (`Kbps`/`Mbps`) for readability.
+- Read/write disk throughput is displayed in byte-based adaptive units (`KB/s`/`MB/s`/`GB/s`) for readability.
 
 ## Buffer Reuse
 Wildcard PDH paths (`GPU Engine(*)`, `PhysicalDisk(*)`) use reusable internal buffers:

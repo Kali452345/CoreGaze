@@ -5,6 +5,7 @@
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <netlistmgr.h>
+#include <winioctl.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,105 @@ static const ULONGLONG kNetworkIdentitySettlingRefreshMs = 2000;
 static const ULONGLONG kNetworkIdentitySettlingWindowMs = 10000;
 static const ULONGLONG kNetworkIdentityUnresolvedWindowMs = 60000;
 static const ULONGLONG kNetworkIdentityEventDebounceMs = 500;
+
+// Temperatures change slowly, so they are sampled on their own cadence instead of every poll.
+// Disk reads are the slowest so NVMe drives can still reach their low-power states.
+static const ULONGLONG kCpuTemperaturePollMs = 2000;
+static const ULONGLONG kGpuTemperaturePollMs = 2000;
+static const ULONGLONG kDiskTemperaturePollMs = 10000;
+static const float kMinValidTemperatureC = 1.0f;
+static const float kMaxValidCpuTemperatureC = 125.0f;
+static const float kMaxValidGpuTemperatureC = 150.0f;
+static const float kMaxValidDiskTemperatureC = 125.0f;
+static const float kDefaultGpuTemperatureWarningC = 80.0f;
+static const float kDefaultGpuTemperatureCriticalC = 90.0f;
+static const float kDefaultDiskTemperatureWarningC = 70.0f;
+static const float kDefaultDiskTemperatureCriticalC = 80.0f;
+static const double kKelvinToCelsiusOffset = 273.15;
+
+// MinGW ships no d3dkmthk.h, so the few D3DKMT types used for GPU temperature are declared here
+// and the entry points are resolved from gdi32.dll at runtime (x64 layout, 8-byte aligned).
+typedef UINT CG_D3DKMT_HANDLE;
+
+struct CG_D3DKMT_OPENADAPTERFROMLUID {
+    LUID AdapterLuid;
+    CG_D3DKMT_HANDLE hAdapter;
+};
+
+struct CG_D3DKMT_QUERYADAPTERINFO {
+    CG_D3DKMT_HANDLE hAdapter;
+    UINT Type;
+    void* pPrivateDriverData;
+    UINT PrivateDriverDataSize;
+};
+
+struct CG_D3DKMT_CLOSEADAPTER {
+    CG_D3DKMT_HANDLE hAdapter;
+};
+
+struct CG_D3DKMT_ADAPTER_PERFDATA {
+    UINT32 PhysicalAdapterIndex;
+    ULONGLONG MemoryFrequency;
+    ULONGLONG MaxMemoryFrequency;
+    ULONGLONG MaxMemoryFrequencyOC;
+    ULONGLONG MemoryBandwidth;
+    ULONGLONG PCIEBandwidth;
+    ULONG FanRPM;
+    ULONG Power;       // tenths of a percent
+    ULONG Temperature; // tenths of a degree Celsius
+    UCHAR PowerStateOverride;
+};
+
+struct CG_D3DKMT_ADAPTER_PERFDATACAPS {
+    UINT32 PhysicalAdapterIndex;
+    ULONGLONG MaxMemoryBandwidth;
+    ULONGLONG MaxPCIEBandwidth;
+    ULONG MaxFanRPM;
+    ULONG TemperatureMax;     // tenths of a degree Celsius
+    ULONG TemperatureWarning; // tenths of a degree Celsius
+};
+
+static_assert(sizeof(CG_D3DKMT_ADAPTER_PERFDATA) == 64, "D3DKMT_ADAPTER_PERFDATA layout mismatch");
+static_assert(sizeof(CG_D3DKMT_ADAPTER_PERFDATACAPS) == 40, "D3DKMT_ADAPTER_PERFDATACAPS layout mismatch");
+
+static const UINT kKmtQueryAdapterPerfData = 62;     // KMTQAITYPE_ADAPTERPERFDATA
+static const UINT kKmtQueryAdapterPerfDataCaps = 63; // KMTQAITYPE_ADAPTERPERFDATA_CAPS
+
+typedef LONG (APIENTRY* PFN_CG_D3DKMTOpenAdapterFromLuid)(CG_D3DKMT_OPENADAPTERFROMLUID*);
+typedef LONG (APIENTRY* PFN_CG_D3DKMTQueryAdapterInfo)(const CG_D3DKMT_QUERYADAPTERINFO*);
+typedef LONG (APIENTRY* PFN_CG_D3DKMTCloseAdapter)(const CG_D3DKMT_CLOSEADAPTER*);
+
+struct D3dkmtApi {
+    PFN_CG_D3DKMTOpenAdapterFromLuid openAdapterFromLuid;
+    PFN_CG_D3DKMTQueryAdapterInfo queryAdapterInfo;
+    PFN_CG_D3DKMTCloseAdapter closeAdapter;
+};
+
+static const D3dkmtApi* GetD3dkmtApi() {
+    static bool attempted = false;
+    static D3dkmtApi api = {};
+    if (!attempted) {
+        attempted = true;
+        HMODULE gdi32 = GetModuleHandleW(L"gdi32.dll");
+        if (gdi32 == NULL) {
+            gdi32 = LoadLibraryW(L"gdi32.dll");
+        }
+        if (gdi32 != NULL) {
+            api.openAdapterFromLuid = (PFN_CG_D3DKMTOpenAdapterFromLuid)(void*)GetProcAddress(gdi32, "D3DKMTOpenAdapterFromLuid");
+            api.queryAdapterInfo = (PFN_CG_D3DKMTQueryAdapterInfo)(void*)GetProcAddress(gdi32, "D3DKMTQueryAdapterInfo");
+            api.closeAdapter = (PFN_CG_D3DKMTCloseAdapter)(void*)GetProcAddress(gdi32, "D3DKMTCloseAdapter");
+        }
+    }
+
+    if (api.openAdapterFromLuid == NULL || api.queryAdapterInfo == NULL || api.closeAdapter == NULL) {
+        return NULL;
+    }
+    return &api;
+}
+
+static bool IsIntervalDue(ULONGLONG lastTick, ULONGLONG now, ULONGLONG intervalMs) {
+    return lastTick == 0 || (now - lastTick) >= intervalMs;
+}
 
 static DWORD ClampPollingIntervalMs(DWORD pollingIntervalMs) {
     if (pollingIntervalMs < 500) {
@@ -155,8 +255,14 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_networkSecondaryEnabled(FALSE),
       m_networkSecondaryIfIndex(0),
       m_networkDisplayMode(NETWORK_DISPLAY_RX_TX),
+      m_temperaturesEnabled(true),
+      m_lastCpuTemperaturePoll(0),
+      m_lastGpuTemperaturePoll(0),
+      m_lastDiskTemperaturePoll(0),
       m_cpuUsage(0.0f),
       m_cpuGHz(0.0f),
+      m_cpuTemperatureAvailable(false),
+      m_cpuTemperatureC(0.0f),
       m_ramSpeedMHz(0),
       m_ramUsedGB(0.0f),
       m_ramTotalGB(0.0f),
@@ -179,7 +285,12 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_pdhDiskBuffer(NULL),
       m_pdhDiskBufferSize(0),
       m_pdhGpuBuffer(NULL),
-      m_pdhGpuBufferSize(0)
+      m_pdhGpuBufferSize(0),
+      m_pdhThermalQuery(NULL),
+      m_pdhThermalCounter(NULL),
+      m_pdhThermalHighPrecision(false),
+      m_pdhThermalBuffer(NULL),
+      m_pdhThermalBufferSize(0)
 {
     m_cpuName[0] = '\0';
     QueryCpuName(m_cpuName, sizeof(m_cpuName));
@@ -201,6 +312,8 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         m_gpuAdapters[i].luidPatternHL[0] = '\0';
         m_gpuAdapters[i].luidPatternLH[0] = '\0';
         m_gpuAdapters[i].adapter3 = NULL;
+        m_gpuAdapters[i].kmtAdapterHandle = 0;
+        m_gpuAdapters[i].kmtTemperatureSupported = false;
 
         ZeroMemory(&m_gpuSnapshots[i], sizeof(GPUMetricsSnapshot));
         m_gpuSnapshots[i].adapterIndex = i;
@@ -220,6 +333,11 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         m_driveCounters[i].activePercent = 0.0f;
         m_driveCounters[i].readKBps = 0.0f;
         m_driveCounters[i].writeKBps = 0.0f;
+        m_driveCounters[i].temperatureSupported = false;
+        m_driveCounters[i].temperatureAvailable = false;
+        m_driveCounters[i].temperatureC = 0.0f;
+        m_driveCounters[i].temperatureWarningC = 0.0f;
+        m_driveCounters[i].temperatureCriticalC = 0.0f;
     }
 
     for (UINT i = 0; i < kMaxNetworkAdapters; ++i) {
@@ -271,6 +389,8 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         PdhCollectQueryData(m_pdhQuery);
     }
 
+    InitializeThermalZoneQuery();
+
     RefreshNetworkIdentityNow();
     // Treat startup like a network event: at sign-in NLM often still reports "Identifying...".
     m_lastNetworkIdentityEventTick = GetTickCount64();
@@ -284,6 +404,7 @@ SystemMonitor::~SystemMonitor() {
 
     ClearDiskCounterHandles();
 
+    CloseGpuKmtHandles();
     for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
         if (m_gpuAdapters[i].adapter3 != NULL) {
             m_gpuAdapters[i].adapter3->Release();
@@ -294,6 +415,18 @@ SystemMonitor::~SystemMonitor() {
     if (m_pdhQuery != NULL) {
         PdhCloseQuery(m_pdhQuery);
         m_pdhQuery = NULL;
+    }
+
+    if (m_pdhThermalQuery != NULL) {
+        PdhCloseQuery(m_pdhThermalQuery);
+        m_pdhThermalQuery = NULL;
+        m_pdhThermalCounter = NULL;
+    }
+
+    if (m_pdhThermalBuffer != NULL) {
+        free(m_pdhThermalBuffer);
+        m_pdhThermalBuffer = NULL;
+        m_pdhThermalBufferSize = 0;
     }
 
     if (m_pdhDiskBuffer != NULL) {
@@ -381,6 +514,20 @@ void SystemMonitor::SetNetworkSecondaryIfIndex(DWORD networkSecondaryIfIndex) {
 
 void SystemMonitor::SetNetworkDisplayMode(DWORD networkDisplayMode) {
     m_networkDisplayMode = ClampNetworkDisplayMode(networkDisplayMode);
+}
+
+void SystemMonitor::SetTemperaturesEnabled(bool enabled) {
+    if (enabled == m_temperaturesEnabled) {
+        return;
+    }
+
+    m_temperaturesEnabled = enabled;
+    // Clearing also resets the cadence timers, so re-enabling reads fresh values on the next poll.
+    m_cpuTemperatureAvailable = false;
+    m_lastCpuTemperaturePoll = 0;
+    ClearGpuTemperatures();
+    ClearDiskTemperatures();
+    SyncLegacyGpuFields();
 }
 
 void SystemMonitor::RefreshNetworkIdentityNow() {
@@ -594,6 +741,10 @@ bool SystemMonitor::GetSelectedDiskMetric(UINT rowIndex, DiskMetricsSnapshot* ou
             outSnapshot->totalGB = m_driveCounters[i].totalGB;
             outSnapshot->freeGB = m_driveCounters[i].freeGB;
             outSnapshot->capacityAvailable = m_driveCounters[i].capacityAvailable;
+            outSnapshot->temperatureAvailable = m_driveCounters[i].temperatureAvailable;
+            outSnapshot->temperatureC = m_driveCounters[i].temperatureC;
+            outSnapshot->temperatureWarningC = m_driveCounters[i].temperatureWarningC;
+            outSnapshot->temperatureCriticalC = m_driveCounters[i].temperatureCriticalC;
             return true;
         }
 
@@ -762,6 +913,27 @@ void SystemMonitor::PollMetrics() {
         }
     }
 
+    const ULONGLONG temperatureNow = GetTickCount64();
+
+    if (pollCpu && m_temperaturesEnabled) {
+        if (IsIntervalDue(m_lastCpuTemperaturePoll, temperatureNow, kCpuTemperaturePollMs)) {
+            PollCpuTemperature();
+            m_lastCpuTemperaturePoll = temperatureNow;
+        }
+    } else {
+        m_cpuTemperatureAvailable = false;
+        m_lastCpuTemperaturePoll = 0;
+    }
+
+    if (pollDisk && m_temperaturesEnabled) {
+        if (IsIntervalDue(m_lastDiskTemperaturePoll, temperatureNow, kDiskTemperaturePollMs)) {
+            PollDiskTemperatures();
+            m_lastDiskTemperaturePoll = temperatureNow;
+        }
+    } else {
+        ClearDiskTemperatures();
+    }
+
     if (!pollCpu) {
         m_cpuUsage = 0.0f;
         m_cpuGHz = 0.0f;
@@ -774,6 +946,15 @@ void SystemMonitor::PollMetrics() {
             m_driveCounters[i].readKBps = 0.0f;
             m_driveCounters[i].writeKBps = 0.0f;
         }
+    }
+
+    if (pollGpu && m_temperaturesEnabled) {
+        if (IsIntervalDue(m_lastGpuTemperaturePoll, temperatureNow, kGpuTemperaturePollMs)) {
+            PollGpuTemperatures();
+            m_lastGpuTemperaturePoll = temperatureNow;
+        }
+    } else {
+        ClearGpuTemperatures();
     }
 
     if (pollGpu) {
@@ -792,6 +973,7 @@ void SystemMonitor::PollMetrics() {
 }
 
 void SystemMonitor::InitializeGpuMonitoring(ID3D11Device* d3dDevice) {
+    CloseGpuKmtHandles();
     for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
         if (m_gpuAdapters[i].adapter3 != NULL) {
             m_gpuAdapters[i].adapter3->Release();
@@ -865,6 +1047,42 @@ void SystemMonitor::InitializeGpuMonitoring(ID3D11Device* d3dDevice) {
             snapshot->utilizationAvailable = false;
             snapshot->memoryAvailable = false;
             snprintf(snapshot->engineLabel, sizeof(snapshot->engineLabel), "N/A");
+            snapshot->temperatureWarningC = kDefaultGpuTemperatureWarningC;
+            snapshot->temperatureCriticalC = kDefaultGpuTemperatureCriticalC;
+
+            // A kernel-mode adapter handle is kept open for the temperature query. Software adapters
+            // (Microsoft Basic Render Driver) have no sensor.
+            gpuSlot->kmtAdapterHandle = 0;
+            gpuSlot->kmtTemperatureSupported = false;
+            const D3dkmtApi* kmt = GetD3dkmtApi();
+            if (kmt != NULL && (desc1.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+                CG_D3DKMT_OPENADAPTERFROMLUID openAdapter = {};
+                openAdapter.AdapterLuid = desc1.AdapterLuid;
+                if (kmt->openAdapterFromLuid(&openAdapter) == 0 && openAdapter.hAdapter != 0) {
+                    gpuSlot->kmtAdapterHandle = openAdapter.hAdapter;
+                    gpuSlot->kmtTemperatureSupported = true;
+
+                    CG_D3DKMT_ADAPTER_PERFDATACAPS caps = {};
+                    CG_D3DKMT_QUERYADAPTERINFO capsQuery = {};
+                    capsQuery.hAdapter = openAdapter.hAdapter;
+                    capsQuery.Type = kKmtQueryAdapterPerfDataCaps;
+                    capsQuery.pPrivateDriverData = &caps;
+                    capsQuery.PrivateDriverDataSize = sizeof(caps);
+                    if (kmt->queryAdapterInfo(&capsQuery) == 0) {
+                        const float capsWarningC = (float)caps.TemperatureWarning / 10.0f;
+                        const float capsMaxC = (float)caps.TemperatureMax / 10.0f;
+                        if (capsWarningC >= kMinValidTemperatureC && capsWarningC <= kMaxValidGpuTemperatureC) {
+                            snapshot->temperatureWarningC = capsWarningC;
+                        }
+                        if (capsMaxC >= snapshot->temperatureWarningC && capsMaxC <= kMaxValidGpuTemperatureC) {
+                            snapshot->temperatureCriticalC = capsMaxC;
+                        }
+                        if (snapshot->temperatureCriticalC < snapshot->temperatureWarningC) {
+                            snapshot->temperatureCriticalC = snapshot->temperatureWarningC;
+                        }
+                    }
+                }
+            }
 
             if (hasActiveAdapterLuid && memcmp(&gpuSlot->adapterLuid, &activeAdapterLuid, sizeof(LUID)) == 0) {
                 m_gpuActiveAdapterIndex = m_gpuAdapterCount;
@@ -994,6 +1212,15 @@ void SystemMonitor::BuildAggregateGpuSnapshot(GPUMetricsSnapshot* outSnapshot) c
         outSnapshot->sharedUsedGB += snapshot->sharedUsedGB;
         if (snapshot->memoryAvailable) {
             outSnapshot->memoryAvailable = true;
+        }
+
+        // Aggregate shows the hottest adapter, with that adapter's own thresholds.
+        if (snapshot->temperatureAvailable &&
+            (!outSnapshot->temperatureAvailable || snapshot->temperatureC > outSnapshot->temperatureC)) {
+            outSnapshot->temperatureAvailable = true;
+            outSnapshot->temperatureC = snapshot->temperatureC;
+            outSnapshot->temperatureWarningC = snapshot->temperatureWarningC;
+            outSnapshot->temperatureCriticalC = snapshot->temperatureCriticalC;
         }
     }
 
@@ -1202,6 +1429,11 @@ void SystemMonitor::ClearDiskCounterHandles() {
         m_driveCounters[i].totalGB = 0.0f;
         m_driveCounters[i].freeGB = 0.0f;
         m_driveCounters[i].capacityAvailable = false;
+        m_driveCounters[i].temperatureSupported = false;
+        m_driveCounters[i].temperatureAvailable = false;
+        m_driveCounters[i].temperatureC = 0.0f;
+        m_driveCounters[i].temperatureWarningC = 0.0f;
+        m_driveCounters[i].temperatureCriticalC = 0.0f;
     }
 }
 
@@ -1211,6 +1443,22 @@ bool SystemMonitor::ResolveDriveToPhysicalDisk(wchar_t driveLetter, int* outPhys
     }
 
     *outPhysicalDiskIndex = -1;
+
+    // Ask the volume which disk it lives on; access 0 is enough and needs no elevation. Volumes
+    // spanning several disks fail here and fall through to the device-path parse below.
+    wchar_t volumePath[8] = { L'\\', L'\\', L'.', L'\\', driveLetter, L':', L'\0' };
+    HANDLE volumeHandle = CreateFileW(volumePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (volumeHandle != INVALID_HANDLE_VALUE) {
+        STORAGE_DEVICE_NUMBER deviceNumber = {};
+        DWORD bytesReturned = 0;
+        const BOOL queried = DeviceIoControl(volumeHandle, IOCTL_STORAGE_GET_DEVICE_NUMBER, NULL, 0,
+            &deviceNumber, sizeof(deviceNumber), &bytesReturned, NULL);
+        CloseHandle(volumeHandle);
+        if (queried && deviceNumber.DeviceType == FILE_DEVICE_DISK) {
+            *outPhysicalDiskIndex = (int)deviceNumber.DeviceNumber;
+            return true;
+        }
+    }
 
     wchar_t driveName[3] = { driveLetter, L':', L'\0' };
     wchar_t targetPath[512] = {};
@@ -1354,6 +1602,10 @@ void SystemMonitor::RebuildDiskCounters() {
         const wchar_t driveLetter = (wchar_t)(L'A' + driveIndex);
         ResolveDriveToPhysicalDisk(driveLetter, &slot->physicalDiskIndex);
 
+        // Spinning disks are skipped: a temperature query can wake a drive that has spun down.
+        slot->temperatureSupported = slot->physicalDiskIndex >= 0 && !IsSeekPenaltyDisk(slot->physicalDiskIndex);
+        slot->temperatureAvailable = false;
+
         wchar_t instanceName[64] = {};
         if (!ResolveDriveToPdhInstance(driveLetter, slot->physicalDiskIndex, instanceName, (int)(sizeof(instanceName) / sizeof(instanceName[0])))) {
             wcscpy_s(instanceName, L"_Total");
@@ -1428,6 +1680,9 @@ void SystemMonitor::RebuildDiskCounters() {
             continue;
         }
     }
+
+    // New topology: read temperatures on the next poll instead of waiting out the interval.
+    m_lastDiskTemperaturePoll = 0;
 
     if (m_pdhQuery != NULL) {
         PdhCollectQueryData(m_pdhQuery);
@@ -1949,6 +2204,266 @@ void SystemMonitor::PollNetworkThroughput() {
     if (m_hasSecondaryNetworkMetrics) {
         updateSnapshot(&m_secondaryNetworkMetrics, &m_secondaryDeltaState);
     }
+}
+
+void SystemMonitor::InitializeThermalZoneQuery() {
+    if (PdhOpenQueryW(NULL, 0, &m_pdhThermalQuery) != ERROR_SUCCESS) {
+        m_pdhThermalQuery = NULL;
+        return;
+    }
+
+    // "High Precision Temperature" is in tenths of Kelvin; older builds only have whole Kelvin.
+    if (PdhAddEnglishCounterW(m_pdhThermalQuery, L"\\Thermal Zone Information(*)\\High Precision Temperature", 0, &m_pdhThermalCounter) == ERROR_SUCCESS) {
+        m_pdhThermalHighPrecision = true;
+        return;
+    }
+
+    if (PdhAddEnglishCounterW(m_pdhThermalQuery, L"\\Thermal Zone Information(*)\\Temperature", 0, &m_pdhThermalCounter) == ERROR_SUCCESS) {
+        m_pdhThermalHighPrecision = false;
+        return;
+    }
+
+    PdhCloseQuery(m_pdhThermalQuery);
+    m_pdhThermalQuery = NULL;
+    m_pdhThermalCounter = NULL;
+}
+
+void SystemMonitor::PollCpuTemperature() {
+    m_cpuTemperatureAvailable = false;
+    if (m_pdhThermalQuery == NULL || m_pdhThermalCounter == NULL) {
+        return;
+    }
+
+    if (PdhCollectQueryData(m_pdhThermalQuery) != ERROR_SUCCESS) {
+        return;
+    }
+
+    DWORD bufferSize = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArrayW(m_pdhThermalCounter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, NULL);
+    if (!((status == (PDH_STATUS)PDH_MORE_DATA || status == (PDH_STATUS)ERROR_SUCCESS) && bufferSize > 0 && itemCount > 0)) {
+        return;
+    }
+
+    if (!EnsurePdhBuffer(m_pdhThermalBuffer, m_pdhThermalBufferSize, bufferSize)) {
+        return;
+    }
+
+    PDH_FMT_COUNTERVALUE_ITEM_W* itemArray = (PDH_FMT_COUNTERVALUE_ITEM_W*)m_pdhThermalBuffer;
+    if (PdhGetFormattedCounterArrayW(m_pdhThermalCounter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, itemArray) != ERROR_SUCCESS) {
+        return;
+    }
+
+    // Report the hottest ACPI thermal zone. Zones reading 0 K or absurd values are firmware placeholders.
+    const double kelvinScale = m_pdhThermalHighPrecision ? 10.0 : 1.0;
+    float hottestC = -1.0f;
+    for (DWORD i = 0; i < itemCount; ++i) {
+        if (itemArray[i].FmtValue.CStatus != ERROR_SUCCESS) {
+            continue;
+        }
+
+        const float celsius = (float)((itemArray[i].FmtValue.doubleValue / kelvinScale) - kKelvinToCelsiusOffset);
+        if (celsius < kMinValidTemperatureC || celsius > kMaxValidCpuTemperatureC) {
+            continue;
+        }
+
+        if (celsius > hottestC) {
+            hottestC = celsius;
+        }
+    }
+
+    if (hottestC >= kMinValidTemperatureC) {
+        m_cpuTemperatureC = hottestC;
+        m_cpuTemperatureAvailable = true;
+    }
+}
+
+void SystemMonitor::PollGpuTemperatures() {
+    const D3dkmtApi* kmt = GetD3dkmtApi();
+
+    for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
+        GPUAdapterSlot* slot = &m_gpuAdapters[i];
+        GPUMetricsSnapshot* snapshot = &m_gpuSnapshots[i];
+        snapshot->temperatureAvailable = false;
+
+        if (kmt == NULL || !slot->kmtTemperatureSupported || slot->kmtAdapterHandle == 0) {
+            continue;
+        }
+
+        CG_D3DKMT_ADAPTER_PERFDATA perfData = {};
+        CG_D3DKMT_QUERYADAPTERINFO query = {};
+        query.hAdapter = slot->kmtAdapterHandle;
+        query.Type = kKmtQueryAdapterPerfData;
+        query.pPrivateDriverData = &perfData;
+        query.PrivateDriverDataSize = sizeof(perfData);
+        if (kmt->queryAdapterInfo(&query) != 0) {
+            // The driver does not implement perf data at all; stop asking.
+            slot->kmtTemperatureSupported = false;
+            continue;
+        }
+
+        // Drivers without a sensor (most integrated GPUs) answer with 0. Keep retrying anyway,
+        // because a dedicated GPU can also report 0 while it is powered down.
+        const float celsius = (float)perfData.Temperature / 10.0f;
+        if (celsius < kMinValidTemperatureC || celsius > kMaxValidGpuTemperatureC) {
+            continue;
+        }
+
+        snapshot->temperatureC = celsius;
+        snapshot->temperatureAvailable = true;
+    }
+
+    SyncLegacyGpuFields();
+}
+
+void SystemMonitor::PollDiskTemperatures() {
+    for (UINT i = 0; i < kMaxDriveLetters; ++i) {
+        DriveCounterSlot* slot = &m_driveCounters[i];
+        if (!slot->selected || !slot->temperatureSupported) {
+            slot->temperatureAvailable = false;
+            continue;
+        }
+
+        // Several volumes on one disk share a single reading.
+        bool copied = false;
+        for (UINT j = 0; j < i; ++j) {
+            const DriveCounterSlot* earlier = &m_driveCounters[j];
+            if (earlier->selected && earlier->temperatureSupported && earlier->physicalDiskIndex == slot->physicalDiskIndex) {
+                slot->temperatureAvailable = earlier->temperatureAvailable;
+                slot->temperatureC = earlier->temperatureC;
+                slot->temperatureWarningC = earlier->temperatureWarningC;
+                slot->temperatureCriticalC = earlier->temperatureCriticalC;
+                copied = true;
+                break;
+            }
+        }
+        if (copied) {
+            continue;
+        }
+
+        float temperatureC = 0.0f;
+        float warningC = 0.0f;
+        float criticalC = 0.0f;
+        if (QueryStorageTemperature(slot->physicalDiskIndex, &temperatureC, &warningC, &criticalC)) {
+            slot->temperatureAvailable = true;
+            slot->temperatureC = temperatureC;
+            slot->temperatureWarningC = warningC > 0.0f ? warningC : kDefaultDiskTemperatureWarningC;
+            slot->temperatureCriticalC = criticalC > 0.0f ? criticalC : kDefaultDiskTemperatureCriticalC;
+            if (slot->temperatureCriticalC < slot->temperatureWarningC) {
+                slot->temperatureCriticalC = slot->temperatureWarningC;
+            }
+        } else {
+            // A drive that has never answered (USB bridges, RAID, some SATA controllers) is not
+            // queried again until the next topology rebuild. One that answered before gets another try.
+            if (!slot->temperatureAvailable) {
+                slot->temperatureSupported = false;
+            }
+            slot->temperatureAvailable = false;
+        }
+    }
+}
+
+void SystemMonitor::CloseGpuKmtHandles() {
+    const D3dkmtApi* kmt = GetD3dkmtApi();
+    for (UINT i = 0; i < kMaxGpuAdapters; ++i) {
+        if (m_gpuAdapters[i].kmtAdapterHandle != 0 && kmt != NULL) {
+            CG_D3DKMT_CLOSEADAPTER closeAdapter = {};
+            closeAdapter.hAdapter = m_gpuAdapters[i].kmtAdapterHandle;
+            kmt->closeAdapter(&closeAdapter);
+        }
+        m_gpuAdapters[i].kmtAdapterHandle = 0;
+        m_gpuAdapters[i].kmtTemperatureSupported = false;
+    }
+}
+
+void SystemMonitor::ClearGpuTemperatures() {
+    for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
+        m_gpuSnapshots[i].temperatureAvailable = false;
+    }
+    m_lastGpuTemperaturePoll = 0;
+}
+
+void SystemMonitor::ClearDiskTemperatures() {
+    for (UINT i = 0; i < kMaxDriveLetters; ++i) {
+        m_driveCounters[i].temperatureAvailable = false;
+    }
+    m_lastDiskTemperaturePoll = 0;
+}
+
+bool SystemMonitor::IsSeekPenaltyDisk(int physicalDiskIndex) {
+    if (physicalDiskIndex < 0) {
+        return false;
+    }
+
+    wchar_t diskPath[32] = {};
+    swprintf_s(diskPath, L"\\\\.\\PhysicalDrive%d", physicalDiskIndex);
+    HANDLE diskHandle = CreateFileW(diskPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (diskHandle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    STORAGE_PROPERTY_QUERY query = {};
+    query.PropertyId = StorageDeviceSeekPenaltyProperty;
+    query.QueryType = PropertyStandardQuery;
+    DEVICE_SEEK_PENALTY_DESCRIPTOR descriptor = {};
+    DWORD bytesReturned = 0;
+    const BOOL queried = DeviceIoControl(diskHandle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+        &descriptor, sizeof(descriptor), &bytesReturned, NULL);
+    CloseHandle(diskHandle);
+
+    return queried && bytesReturned >= sizeof(descriptor) && descriptor.IncursSeekPenalty;
+}
+
+bool SystemMonitor::QueryStorageTemperature(int physicalDiskIndex, float* outTemperatureC, float* outWarningC, float* outCriticalC) {
+    if (physicalDiskIndex < 0 || outTemperatureC == NULL || outWarningC == NULL || outCriticalC == NULL) {
+        return false;
+    }
+
+    // Opened and closed per read: holding the handle would block safe removal of external drives.
+    wchar_t diskPath[32] = {};
+    swprintf_s(diskPath, L"\\\\.\\PhysicalDrive%d", physicalDiskIndex);
+    HANDLE diskHandle = CreateFileW(diskPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (diskHandle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    STORAGE_PROPERTY_QUERY query = {};
+    query.PropertyId = StorageDeviceTemperatureProperty;
+    query.QueryType = PropertyStandardQuery;
+
+    // Room for the descriptor plus several sensor entries.
+    union {
+        STORAGE_TEMPERATURE_DATA_DESCRIPTOR descriptor;
+        BYTE raw[512];
+    } output;
+    ZeroMemory(&output, sizeof(output));
+
+    DWORD bytesReturned = 0;
+    const BOOL queried = DeviceIoControl(diskHandle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+        &output, sizeof(output), &bytesReturned, NULL);
+    CloseHandle(diskHandle);
+
+    const DWORD minimumBytes = (DWORD)(FIELD_OFFSET(STORAGE_TEMPERATURE_DATA_DESCRIPTOR, TemperatureInfo) + sizeof(STORAGE_TEMPERATURE_INFO));
+    if (!queried || bytesReturned < minimumBytes || output.descriptor.InfoCount == 0) {
+        return false;
+    }
+
+    // Entry 0 is the composite temperature the drive reports for itself.
+    const float celsius = (float)output.descriptor.TemperatureInfo[0].Temperature;
+    if (celsius < kMinValidTemperatureC || celsius > kMaxValidDiskTemperatureC) {
+        return false;
+    }
+
+    *outTemperatureC = celsius;
+    *outWarningC = (float)output.descriptor.WarningTemperature;
+    *outCriticalC = (float)output.descriptor.CriticalTemperature;
+    if (*outWarningC < kMinValidTemperatureC || *outWarningC > kMaxValidDiskTemperatureC) {
+        *outWarningC = 0.0f;
+    }
+    if (*outCriticalC < kMinValidTemperatureC || *outCriticalC > kMaxValidDiskTemperatureC) {
+        *outCriticalC = 0.0f;
+    }
+    return true;
 }
 
 void SystemMonitor::QueryCpuName(char* outName, int outSize) {

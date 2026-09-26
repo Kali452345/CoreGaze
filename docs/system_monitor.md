@@ -6,6 +6,7 @@ The `SystemMonitor` component is the native telemetry backend for the overlay. I
 
 ## Cadence Separation
 - Fast cadence (`500ms`, `1000ms`, `2000ms`): numeric counters (CPU, RAM, GPU utilization/memory, disk active/read/write throughput, network RX/TX rates).
+- Temperatures: own timers (`2s` CPU/GPU, `10s` disk), only while the metric is visible and temperatures are enabled. See `temperature_metrics.md`.
 - Network identity (active network source, SSID labels, adapter lists): event-driven, with an adaptive safety timer (`2s` while settling after a network event, `30s` otherwise). See `network_identity.md`.
 
 This split avoids expensive identity/mapping work in the hot polling path.
@@ -18,6 +19,7 @@ The monitor supports runtime control from tray settings:
 - `SetGPUDisplayMode(...)`, `SetSelectedGPUAdapterIndex(...)`: GPU output mode/source selection.
 - `SetNetworkPrimaryMode(...)`, `SetNetworkPrimaryIfIndex(...)`: auto/manual primary network source.
 - `SetNetworkSecondaryEnabled(...)`, `SetNetworkSecondaryIfIndex(...)`: optional secondary adapter.
+- `SetTemperaturesEnabled(...)`: CPU/GPU/disk temperature polling on or off.
 - `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
 
 ## CPU and RAM Collection
@@ -56,7 +58,7 @@ Disk telemetry is now selected-drive aware:
 - Unselected drives have no active counter handles and incur no polling cost.
 
 ## Drive Mapping Strategy
-- First-pass mapping uses `QueryDosDevice`.
+- First-pass mapping uses `IOCTL_STORAGE_GET_DEVICE_NUMBER` on `\\.\X:` (works for NVMe), falling back to `QueryDosDevice`.
 - PDH instance resolution then attempts physical-disk instance matching (index-aware when available, drive-token-aware otherwise).
 - If mapping confidence is low, counters fall back to `_Total` and snapshot is marked fallback.
 

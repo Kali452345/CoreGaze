@@ -36,12 +36,19 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
   - Primary + Secondary RX/TX
   - (The former `Primary total Mbps` entry was removed because the HUD always renders split bars; a saved value of `0` loads as split.)
 
+## Temperature Controls
+- `Temperatures` submenu:
+  - Show Temperatures (also stops temperature polling when off)
+  - Celsius / Fahrenheit (grayed out while temperatures are hidden)
+- See `temperature_metrics.md`.
+
 ## Persistence Keys
 - `Display`: `VisibleMask`, `OverlayVisible`
 - `Polling`: `IntervalMs`
 - `Disk`: `SelectedMask`
 - `GPU`: `DisplayMode`, `SelectedAdapterIndex`
 - `Network`: `PrimaryMode`, `PrimaryIfIndex`, `SecondaryEnabled`, `SecondaryIfIndex`, `DisplayMode`
+- `Temperature`: `Show`, `Fahrenheit`
 - `General`: `StartWithWindows`
 - `Version`: `ConfigSchemaVersion`, `LastLaunchedVersion`
 

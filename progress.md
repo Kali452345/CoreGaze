@@ -516,3 +516,23 @@
 - Implement temperature telemetry (ACPI thermal zone via PDH, NVMe via `IOCTL_STORAGE_QUERY_PROPERTY`, GPU via D3DKMT adapter perf data).
 - Follow-ups from review: DPI awareness manifest, pin ImGui version in CMake, single source of truth for the app version, HUD-sized host window.
 
+
+## 2026-09-26: Temperature Telemetry (CPU, GPU, Disk)
+
+**Summary of Work Done:**
+- **CPU temperature**: hottest ACPI thermal zone from PDH `\Thermal Zone Information(*)\High Precision Temperature` (falls back to `\Temperature`), in a dedicated PDH query sampled every 2s.
+- **GPU temperature**: `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` per adapter LUID (the same source Task Manager uses). D3DKMT types are declared locally because MinGW has no `d3dkmthk.h`, and the entry points are resolved from `gdi32.dll`. Warning/critical thresholds come from `ADAPTERPERFDATA_CAPS` when reported. Aggregate mode shows the hottest adapter.
+- **Disk temperature**: `IOCTL_STORAGE_QUERY_PROPERTY` / `StorageDeviceTemperatureProperty` on `\.\PhysicalDriveN`, every 10s, with the drive's own WCTEMP/CCTEMP thresholds. Handles are opened per read (never block safe removal), spinning HDDs are skipped (no spin-up), and drives that never answer are not retried until the next topology rebuild.
+- **Physical disk mapping fix**: drive-letter-to-disk mapping now uses `IOCTL_STORAGE_GET_DEVICE_NUMBER`; the old `QueryDosDevice` parse always failed for `HarddiskVolumeN` targets.
+- **HUD**: right-aligned temperature on the CPU, disk and GPU title lines, grey/orange/red by threshold (CPU fixed 85/95 °C).
+- **Tray**: new `Temperatures` submenu (Show Temperatures, Celsius/Fahrenheit), persisted as `[Temperature] Show` / `Fahrenheit`.
+- No admin rights, kernel drivers or WMI. New doc: `docs/temperature_metrics.md`.
+
+**Current State:**
+- Builds clean with w64devkit.
+- A harness linking `SystemMonitor.cpp` read CPU zone 75-81 °C and NVMe 40 °C (warn 75, crit 85). The USB SSD and card reader correctly show no temperature, and the Intel UHD 620 reports 0 (no sensor), so no GPU temperature is shown. Disabling temperatures clears readings.
+- Not yet verified: HUD rendering of the temperature labels, and GPU temperature on a dedicated NVIDIA/AMD GPU (including whether polling keeps a hybrid laptop's dGPU awake).
+
+**Immediate Next Steps:**
+- Visually check the HUD labels and °F toggle; test on a machine with a dedicated GPU.
+- Remaining review follow-ups: DPI awareness manifest, pin ImGui version, single source of truth for the app version, HUD-sized host window, Task Manager-matching CPU counter, less frequent free-space queries, stale signing workflow template.

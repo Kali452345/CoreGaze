@@ -14,6 +14,7 @@ The HUD is rendered with Dear ImGui on a transparent, click-through DX11 surface
 - All rows are visibility-gated by tray mask.
 - Progress bars are bounded to `[0, 1]` before rendering.
 - Row payloads are compact and identity-rich.
+- When temperatures are enabled, CPU, disk and GPU titles show a right-aligned, threshold-colored temperature (see `temperature_metrics.md`).
 
 ## Metric Rows
 

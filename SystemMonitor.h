@@ -44,6 +44,10 @@ struct GPUMetricsSnapshot {
     bool utilizationAvailable;
     bool memoryAvailable;
     char engineLabel[16];
+    bool temperatureAvailable;
+    float temperatureC;
+    float temperatureWarningC;
+    float temperatureCriticalC;
 };
 
 struct DiskMetricsSnapshot {
@@ -57,6 +61,10 @@ struct DiskMetricsSnapshot {
     float totalGB;
     float freeGB;
     bool capacityAvailable;
+    bool temperatureAvailable;
+    float temperatureC;
+    float temperatureWarningC;
+    float temperatureCriticalC;
 };
 
 struct NetworkMetricsSnapshot {
@@ -97,6 +105,8 @@ public:
     DWORD GetNetworkSecondaryIfIndex() const { return m_networkSecondaryIfIndex; }
     void SetNetworkDisplayMode(DWORD networkDisplayMode);
     DWORD GetNetworkDisplayMode() const { return m_networkDisplayMode; }
+    void SetTemperaturesEnabled(bool enabled);
+    bool AreTemperaturesEnabled() const { return m_temperaturesEnabled; }
     void RefreshNetworkIdentityNow();
     void RefreshDiskTopologyNow();
     void RequestDiskTopologyRefresh();
@@ -120,6 +130,8 @@ public:
     const char* GetCPUName() const { return m_cpuName; }
     float GetCPUUsage() const { return m_cpuUsage; }
     float GetCPUGHz() const { return m_cpuGHz; }
+    bool IsCPUTemperatureAvailable() const { return m_cpuTemperatureAvailable; }
+    float GetCPUTemperatureC() const { return m_cpuTemperatureC; }
     DWORD GetRAMSpeedMHz() const { return m_ramSpeedMHz; }
     float GetRAMUsedGB() const { return m_ramUsedGB; }
     float GetRAMTotalGB() const { return m_ramTotalGB; }
@@ -152,6 +164,8 @@ private:
         char luidPatternHL[40];
         char luidPatternLH[40];
         IDXGIAdapter3* adapter3;
+        UINT kmtAdapterHandle;
+        bool kmtTemperatureSupported;
     };
 
     struct DriveCounterSlot {
@@ -170,6 +184,11 @@ private:
         float totalGB;
         float freeGB;
         bool capacityAvailable;
+        bool temperatureSupported;
+        bool temperatureAvailable;
+        float temperatureC;
+        float temperatureWarningC;
+        float temperatureCriticalC;
     };
 
     struct NetworkAdapterSlot {
@@ -218,10 +237,17 @@ private:
     DWORD m_networkSecondaryIfIndex;
     DWORD m_networkDisplayMode;
 
+    bool m_temperaturesEnabled;
+    ULONGLONG m_lastCpuTemperaturePoll;
+    ULONGLONG m_lastGpuTemperaturePoll;
+    ULONGLONG m_lastDiskTemperaturePoll;
+
     // Cache metrics
     char m_cpuName[64];
     float m_cpuUsage;
     float m_cpuGHz;
+    bool m_cpuTemperatureAvailable;
+    float m_cpuTemperatureC;
     DWORD m_ramSpeedMHz;
     float m_ramUsedGB;
     float m_ramTotalGB;
@@ -265,12 +291,26 @@ private:
     BYTE* m_pdhGpuBuffer;
     DWORD m_pdhGpuBufferSize;
 
+    // Thermal zones live in their own query so they can be sampled on a slower cadence.
+    PDH_HQUERY m_pdhThermalQuery;
+    PDH_HCOUNTER m_pdhThermalCounter;
+    bool m_pdhThermalHighPrecision;
+    BYTE* m_pdhThermalBuffer;
+    DWORD m_pdhThermalBufferSize;
+
     void PollMetrics();
     void InitializeGpuMonitoring(ID3D11Device* d3dDevice);
     void PollGpuMetrics();
     void RefreshNetworkIdentity();
     void PollNetworkThroughput();
     void SyncLegacyGpuFields();
+    void InitializeThermalZoneQuery();
+    void PollCpuTemperature();
+    void PollGpuTemperatures();
+    void PollDiskTemperatures();
+    void CloseGpuKmtHandles();
+    void ClearGpuTemperatures();
+    void ClearDiskTemperatures();
     void InitializeNetworkNotifications();
     void ShutdownNetworkNotifications();
     void ArmNetworkAddressChangeNotification();
@@ -281,6 +321,8 @@ private:
     void RebuildDiskCounters();
     void ClearDiskCounterHandles();
     bool ResolveDriveToPhysicalDisk(wchar_t driveLetter, int* outPhysicalDiskIndex) const;
+    static bool IsSeekPenaltyDisk(int physicalDiskIndex);
+    static bool QueryStorageTemperature(int physicalDiskIndex, float* outTemperatureC, float* outWarningC, float* outCriticalC);
     bool ResolveDriveToPdhInstance(wchar_t driveLetter, int preferredDiskIndex, wchar_t* outInstance, int outInstanceLength);
 
     int FindGpuAdapterIndexForInstance(const char* instanceName) const;

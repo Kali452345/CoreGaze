@@ -43,6 +43,10 @@ static const DWORD kConfigSchemaVersion = 1;
 static const int kOverlayHotkeyId = 0x0C0E;
 static const UINT kOverlayHotkeyModifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
 static const UINT kOverlayHotkeyVirtualKey = 'O';
+// Thermal zones have no reported limits, so CPU thresholds are fixed. GPU and disk thresholds come
+// from the device (or SystemMonitor defaults) through their snapshots.
+static const float kCpuTemperatureWarningC = 85.0f;
+static const float kCpuTemperatureCriticalC = 95.0f;
 
 enum TrayCommandId : UINT {
     ID_TRAY_TOGGLE_OVERLAY = 5001,
@@ -70,6 +74,9 @@ enum TrayCommandId : UINT {
     ID_TRAY_NETWORK_SECONDARY_BASE = 5640,
     ID_TRAY_NETWORK_DISPLAY_RXTX = 5661,
     ID_TRAY_NETWORK_DISPLAY_RXTX_SECONDARY = 5662,
+    ID_TRAY_TEMPERATURE_SHOW = 5701,
+    ID_TRAY_TEMPERATURE_CELSIUS = 5702,
+    ID_TRAY_TEMPERATURE_FAHRENHEIT = 5703,
     ID_TRAY_STARTUP_TOGGLE = 5901,
     ID_TRAY_EXIT = 5999
 };
@@ -87,6 +94,8 @@ struct AppSettings {
     BOOL networkSecondaryEnabled;
     DWORD networkSecondaryIfIndex;
     DWORD networkDisplayMode;
+    BOOL showTemperatures;
+    BOOL temperatureFahrenheit;
     BOOL startupEnabled;
     float overlayPosX;
     float overlayPosY;
@@ -106,6 +115,8 @@ static AppSettings g_appSettings = {
     FALSE,
     0,
     NETWORK_DISPLAY_RX_TX,
+    TRUE,
+    FALSE,
     FALSE,
     0.0f,
     0.0f,
@@ -165,6 +176,7 @@ static void RemoveLegacyExecutableIfPresent();
 static void FormatNetworkRateMbps(float mbps, char* output, int outputSize);
 static void FormatDiskRateKBps(float kbps, char* output, int outputSize);
 static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImVec4& baseColor);
+static void DrawTitleTemperature(float temperatureC, float warningC, float criticalC, float rowWidth);
 static void ResetNetworkBarScaleState(NetworkBarScaleState* state, ULONG ifIndex);
 static float ComputeAdaptiveNetworkProgress(float mbps, float* ceilingMbps, int* highSamples);
 
@@ -428,6 +440,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             const float cpuProgress = sysMonitor.GetCPUUsage() / 100.0f;
             const ImVec4 cpuBaseColor(0.2f, 0.6f, 1.0f, 1.0f);
             ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", cpuTitle);
+            if (g_appSettings.showTemperatures && sysMonitor.IsCPUTemperatureAvailable()) {
+                DrawTitleTemperature(sysMonitor.GetCPUTemperatureC(), kCpuTemperatureWarningC, kCpuTemperatureCriticalC, barWidth);
+            }
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(cpuProgress, cpuBaseColor));
             ImGui::ProgressBar(cpuProgress, ImVec2(barWidth, barHeight), cpuBuf);
             ImGui::PopStyleColor();
@@ -507,6 +522,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     if (diskProgress > 1.0f) diskProgress = 1.0f;
 
                     ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", diskTitle);
+                    if (g_appSettings.showTemperatures && diskSnapshot.temperatureAvailable) {
+                        DrawTitleTemperature(diskSnapshot.temperatureC, diskSnapshot.temperatureWarningC, diskSnapshot.temperatureCriticalC, barWidth);
+                    }
                     const ImVec4 diskBaseColor(1.0f, 0.6f, 0.1f, 1.0f);
                     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(diskProgress, diskBaseColor));
                     ImGui::ProgressBar(diskProgress, ImVec2(barWidth, barHeight), diskBuf);
@@ -622,6 +640,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     }
 
                     ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s: %s", gpuTitle, gpuSnapshot.adapterName);
+                    if (g_appSettings.showTemperatures && gpuSnapshot.temperatureAvailable) {
+                        DrawTitleTemperature(gpuSnapshot.temperatureC, gpuSnapshot.temperatureWarningC, gpuSnapshot.temperatureCriticalC, barWidth);
+                    }
 
                     // GPU Core Utilization Bar
                     char gpuBuf[64];
@@ -1013,6 +1034,35 @@ static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImV
     return baseColor;
 }
 
+// Draws the temperature on the same line as the metric title, right-aligned to the bar edge.
+// Long titles push it further right instead of overlapping (the window auto-resizes).
+static void DrawTitleTemperature(float temperatureC, float warningC, float criticalC, float rowWidth) {
+    const ImVec4 kNormalColor(0.75f, 0.75f, 0.75f, 1.0f);
+    const ImVec4 kWarningColor(1.0f, 0.55f, 0.0f, 1.0f);
+    const ImVec4 kCriticalColor(1.0f, 0.15f, 0.15f, 1.0f);
+
+    ImVec4 color = kNormalColor;
+    if (criticalC > 0.0f && temperatureC >= criticalC) {
+        color = kCriticalColor;
+    } else if (warningC > 0.0f && temperatureC >= warningC) {
+        color = kWarningColor;
+    }
+
+    char text[24];
+    if (g_appSettings.temperatureFahrenheit) {
+        snprintf(text, sizeof(text), "%.0f\xC2\xB0""F", (temperatureC * 9.0f / 5.0f) + 32.0f);
+    } else {
+        snprintf(text, sizeof(text), "%.0f\xC2\xB0""C", temperatureC);
+    }
+
+    ImGui::SameLine();
+    const float alignedX = ImGui::GetCursorStartPos().x + rowWidth - ImGui::CalcTextSize(text).x;
+    if (ImGui::GetCursorPosX() < alignedX) {
+        ImGui::SetCursorPosX(alignedX);
+    }
+    ImGui::TextColored(color, "%s", text);
+}
+
 static void ResetNetworkBarScaleState(NetworkBarScaleState* state, ULONG ifIndex) {
     if (state == NULL) {
         return;
@@ -1165,6 +1215,8 @@ void LoadAppSettings() {
     g_appSettings.networkSecondaryEnabled = GetPrivateProfileIntW(L"Network", L"SecondaryEnabled", 0, g_configPath) ? TRUE : FALSE;
     g_appSettings.networkSecondaryIfIndex = (DWORD)GetPrivateProfileIntW(L"Network", L"SecondaryIfIndex", 0, g_configPath);
     g_appSettings.networkDisplayMode = NormalizeNetworkDisplayMode(GetPrivateProfileIntW(L"Network", L"DisplayMode", NETWORK_DISPLAY_RX_TX, g_configPath));
+    g_appSettings.showTemperatures = GetPrivateProfileIntW(L"Temperature", L"Show", 1, g_configPath) ? TRUE : FALSE;
+    g_appSettings.temperatureFahrenheit = GetPrivateProfileIntW(L"Temperature", L"Fahrenheit", 0, g_configPath) ? TRUE : FALSE;
     BOOL startupRegistryEnabled = IsStartupEnabledInRegistry() ? TRUE : FALSE;
     g_appSettings.startupEnabled = GetPrivateProfileIntW(L"General", L"StartWithWindows", startupRegistryEnabled ? 1 : 0, g_configPath) ? TRUE : FALSE;
     g_appSettings.hasSavedPos = GetPrivateProfileIntW(L"Window", L"HasSavedPos", 0, g_configPath) ? TRUE : FALSE;
@@ -1191,6 +1243,8 @@ void SaveAppSettings() {
     WriteUIntSetting(L"Network", L"SecondaryEnabled", g_appSettings.networkSecondaryEnabled ? 1u : 0u);
     WriteUIntSetting(L"Network", L"SecondaryIfIndex", g_appSettings.networkSecondaryIfIndex);
     WriteUIntSetting(L"Network", L"DisplayMode", NormalizeNetworkDisplayMode(g_appSettings.networkDisplayMode));
+    WriteUIntSetting(L"Temperature", L"Show", g_appSettings.showTemperatures ? 1u : 0u);
+    WriteUIntSetting(L"Temperature", L"Fahrenheit", g_appSettings.temperatureFahrenheit ? 1u : 0u);
     WriteUIntSetting(L"General", L"StartWithWindows", g_appSettings.startupEnabled ? 1u : 0u);
     WriteUIntSetting(L"Window", L"HasSavedPos", g_appSettings.hasSavedPos ? 1u : 0u);
     if (g_appSettings.hasSavedPos) {
@@ -1228,6 +1282,7 @@ void ApplyRuntimeSettings(HWND hwnd) {
         g_systemMonitor->SetNetworkSecondaryEnabled(g_appSettings.networkSecondaryEnabled);
         g_systemMonitor->SetNetworkSecondaryIfIndex(g_appSettings.networkSecondaryIfIndex);
         g_systemMonitor->SetNetworkDisplayMode(g_appSettings.networkDisplayMode);
+        g_systemMonitor->SetTemperaturesEnabled(g_appSettings.showTemperatures != FALSE);
     }
 
     ShowWindow(hwnd, g_appSettings.overlayVisible ? SW_SHOWNA : SW_HIDE);
@@ -1391,6 +1446,15 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
     case ID_TRAY_NETWORK_DISPLAY_RXTX_SECONDARY:
         g_appSettings.networkDisplayMode = NETWORK_DISPLAY_RX_TX_SECONDARY;
         break;
+    case ID_TRAY_TEMPERATURE_SHOW:
+        g_appSettings.showTemperatures = g_appSettings.showTemperatures ? FALSE : TRUE;
+        break;
+    case ID_TRAY_TEMPERATURE_CELSIUS:
+        g_appSettings.temperatureFahrenheit = FALSE;
+        break;
+    case ID_TRAY_TEMPERATURE_FAHRENHEIT:
+        g_appSettings.temperatureFahrenheit = TRUE;
+        break;
     case ID_TRAY_STARTUP_TOGGLE:
         g_appSettings.startupEnabled = g_appSettings.startupEnabled ? FALSE : TRUE;
         break;
@@ -1453,6 +1517,7 @@ void ShowTrayContextMenu(HWND hwnd) {
     HMENU networkPrimaryMenu = CreatePopupMenu();
     HMENU networkSecondaryMenu = CreatePopupMenu();
     HMENU networkDisplayMenu = CreatePopupMenu();
+    HMENU temperatureMenu = CreatePopupMenu();
 
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag(g_appSettings.overlayVisible), ID_TRAY_TOGGLE_OVERLAY, L"Show Overlay");
     AppendMenuW(rootMenu, MF_STRING, ID_TRAY_RESET_POSITION, L"Reset Overlay Position");
@@ -1538,6 +1603,13 @@ void ShowTrayContextMenu(HWND hwnd) {
     AppendMenuW(networkMenu, MF_POPUP, (UINT_PTR)networkSecondaryMenu, L"Secondary Adapter");
     AppendMenuW(networkMenu, MF_POPUP, (UINT_PTR)networkDisplayMenu, L"Display Mode");
     AppendMenuW(rootMenu, MF_POPUP, (UINT_PTR)networkMenu, L"Network");
+
+    const UINT unitFlags = g_appSettings.showTemperatures ? 0 : MF_GRAYED;
+    AppendMenuW(temperatureMenu, MF_STRING | CheckedFlag(g_appSettings.showTemperatures), ID_TRAY_TEMPERATURE_SHOW, L"Show Temperatures");
+    AppendMenuW(temperatureMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(temperatureMenu, MF_STRING | unitFlags | CheckedFlag(!g_appSettings.temperatureFahrenheit), ID_TRAY_TEMPERATURE_CELSIUS, L"Celsius (\u00B0C)");
+    AppendMenuW(temperatureMenu, MF_STRING | unitFlags | CheckedFlag(g_appSettings.temperatureFahrenheit), ID_TRAY_TEMPERATURE_FAHRENHEIT, L"Fahrenheit (\u00B0F)");
+    AppendMenuW(rootMenu, MF_POPUP, (UINT_PTR)temperatureMenu, L"Temperatures");
 
     AppendMenuW(rootMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag(g_appSettings.startupEnabled), ID_TRAY_STARTUP_TOGGLE, L"Launch on Windows Startup");

@@ -24,6 +24,9 @@ DwmExtendFrameIntoClientArea(hwnd, &margins);
 ```
 Passing `-1` to `DwmExtendFrameIntoClientArea` removes the opaque backing of the Win32 window's client space entirely.
 
+## DPI Awareness
+The process opts into per-monitor v2 DPI awareness before creating the window, so the overlay renders at native resolution and all coordinates are physical pixels. See `dpi_scaling.md`.
+
 ## Work-Area Boundaries
 CoreGaze constrains the overlay host window to desktop work-area bounds instead of full virtual-screen bounds:
 

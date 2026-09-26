@@ -28,6 +28,9 @@ static bool                     g_isSuspended = false;
 static HPOWERNOTIFY             g_powerNotify = NULL;
 
 static const UINT WM_TRAYICON = WM_APP + 101;
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0 // Declared only for WINVER >= 0x0601 in some SDKs.
+#endif
 static const UINT IDI_MAINICON = 101;
 static const wchar_t* kWindowClassName = L"CoreGazeClass";
 static const wchar_t* kWindowTitle = L"CoreGaze";
@@ -43,7 +46,14 @@ static const wchar_t* kStartupRegistryValueName = L"CoreGaze";
 #define COREGAZE_VERSION_TEXT "0.0.0-dev"
 #endif
 static const wchar_t* kCurrentAppVersion = L"" COREGAZE_VERSION_TEXT;
-static const DWORD kConfigSchemaVersion = 1;
+// Schema 2: [Window] PosX/PosY are physical pixels (the process became per-monitor DPI aware).
+static const DWORD kConfigSchemaVersion = 2;
+// HUD layout at 100% scaling (96 DPI); multiplied by g_dpiScale when rendering.
+static const float kHudFontSize = 17.0f;
+static const float kHudBarWidth = 290.0f;
+static const float kHudBarHeight = 20.0f;
+static const float kHudDefaultRightOffset = 330.0f;
+static const float kHudDefaultTopOffset = 30.0f;
 static const int kOverlayHotkeyId = 0x0C0E;
 static const UINT kOverlayHotkeyModifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
 static const UINT kOverlayHotkeyVirtualKey = 'O';
@@ -132,6 +142,9 @@ static wchar_t g_diagnosticsPath[MAX_PATH] = {};
 static SystemMonitor* g_systemMonitor = nullptr;
 static HANDLE g_singleInstanceMutex = NULL;
 static bool g_resetPositionRequested = false;
+// The HUD always lives on the primary monitor's work area, so one scale factor covers it.
+static float g_dpiScale = 1.0f;
+static bool g_dpiScaleChanged = false;
 
 static wchar_t g_discoveredGpuNames[8][128] = {};
 static UINT g_discoveredGpuCount = 0;
@@ -169,6 +182,8 @@ void ShowTrayContextMenu(HWND hwnd);
 void HandleTrayCommand(HWND hwnd, UINT commandId);
 static RECT GetOverlayWorkAreaBounds();
 static void ApplyOverlayBounds(HWND hwnd);
+static float GetPrimaryMonitorDpiScale();
+static void ApplyHudStyle(float scale);
 static HICON LoadAppIcon(HINSTANCE hInstance, int width, int height);
 static bool IsStartupEnabledInRegistry();
 static void SetStartupEnabledInRegistry(BOOL enabled);
@@ -204,6 +219,11 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     // Initialize COM for Network List Manager queries (avoids WLAN API Location icon)
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    // Per-monitor v2 DPI awareness: render at native resolution instead of being bitmap-stretched
+    // (blurry) by Windows. Must happen before any window exists; LoadAppSettings needs the scale.
+    ImGui_ImplWin32_EnableDpiAwareness();
+    g_dpiScale = GetPrimaryMonitorDpiScale();
 
     LoadAppSettings();
 
@@ -265,31 +285,22 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     // The HUD position lives in config.ini; without this ImGui drops an imgui.ini into the working directory.
     io.IniFilename = nullptr;
 
-    // Load custom font with high-clarity rasterization settings
+    // Load custom font with high-clarity rasterization settings. The size is the 96 DPI size;
+    // style.FontScaleDpi (set in ApplyHudStyle) makes ImGui rasterize it at the monitor's scale.
     ImFontConfig fontConfig;
     fontConfig.OversampleH = 3;
     fontConfig.OversampleV = 2;
     fontConfig.PixelSnapH = true;
 
-    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", 17.0f, &fontConfig);
+    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", kHudFontSize, &fontConfig);
     if (font == nullptr) {
-        font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f, &fontConfig);
+        font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", kHudFontSize, &fontConfig);
     }
     if (font == nullptr) {
         io.Fonts->AddFontDefault();
     }
 
-    // Setup Dear ImGui style
-    ImGui::StyleColorsDark();
-    
-    // Modern UI Styling - Sleek, compact HUD
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 3.0f;
-    style.WindowPadding = ImVec2(10.0f, 8.0f);
-    style.ItemSpacing = ImVec2(6.0f, 3.0f);
-    style.FramePadding = ImVec2(4.0f, 2.0f);
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.65f); // 65% opacity black
+    ApplyHudStyle(g_dpiScale);
 
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hwnd);
@@ -380,6 +391,12 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             continue;
         }
 
+        // Display scaling changed (WM_DPICHANGED); restyle between frames.
+        if (g_dpiScaleChanged) {
+            ApplyHudStyle(g_dpiScale);
+            g_dpiScaleChanged = false;
+        }
+
         // Start the Dear ImGui frame
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -388,8 +405,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         // Minimalist HUD Configuration - Saved position or default top right
         if (g_resetPositionRequested) {
             const RECT workAreaBounds = GetOverlayWorkAreaBounds();
-            g_appSettings.overlayPosX = (float)workAreaBounds.right - 330.0f;
-            g_appSettings.overlayPosY = (float)workAreaBounds.top + 30.0f;
+            g_appSettings.overlayPosX = (float)workAreaBounds.right - kHudDefaultRightOffset * g_dpiScale;
+            g_appSettings.overlayPosY = (float)workAreaBounds.top + kHudDefaultTopOffset * g_dpiScale;
             g_appSettings.hasSavedPos = FALSE;
             ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_Always);
             g_resetPositionRequested = false;
@@ -397,7 +414,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_FirstUseEver);
         } else {
             const RECT workAreaBounds = GetOverlayWorkAreaBounds();
-            ImGui::SetNextWindowPos(ImVec2((float)workAreaBounds.right - 330.0f, (float)workAreaBounds.top + 30.0f), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((float)workAreaBounds.right - kHudDefaultRightOffset * g_dpiScale, (float)workAreaBounds.top + kHudDefaultTopOffset * g_dpiScale), ImGuiCond_FirstUseEver);
         }
 
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0)); // No border outline
@@ -428,8 +445,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             }
         }
 
-        float barWidth = 290.0f;
-        float barHeight = 20.0f;
+        float barWidth = (float)(int)(kHudBarWidth * g_dpiScale);
+        float barHeight = (float)(int)(kHudBarHeight * g_dpiScale);
 
         if ((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_CPU) != 0) {
             // CPU Metrics (Blue ProgressBar)
@@ -975,6 +992,39 @@ static void ApplyOverlayBounds(HWND hwnd) {
     SetWindowPos(hwnd, HWND_TOPMOST, bounds.left, bounds.top, width, height, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
+static float GetPrimaryMonitorDpiScale() {
+    const POINT origin = { 0, 0 };
+    const float scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY));
+    return (scale > 0.0f) ? scale : 1.0f;
+}
+
+// Rebuilds the HUD style from its 96 DPI values so repeated DPI changes never compound rounding.
+static void ApplyHudStyle(float scale) {
+    ImGuiStyle style;
+    ImGui::StyleColorsDark(&style);
+
+    // Modern UI Styling - Sleek, compact HUD
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 3.0f;
+    style.WindowPadding = ImVec2(10.0f, 8.0f);
+    style.ItemSpacing = ImVec2(6.0f, 3.0f);
+    style.FramePadding = ImVec2(4.0f, 2.0f);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.65f); // 65% opacity black
+
+    style.ScaleAllSizes(scale);
+    style.FontScaleDpi = scale;
+    ImGui::GetStyle() = style;
+}
+
+// The window covers the primary work area, so a primary-monitor scale change is the only one that matters.
+static void RefreshDpiScale() {
+    const float scale = GetPrimaryMonitorDpiScale();
+    if (scale != g_dpiScale) {
+        g_dpiScale = scale;
+        g_dpiScaleChanged = true;
+    }
+}
+
 static HICON LoadAppIcon(HINSTANCE hInstance, int width, int height) {
     return (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_MAINICON), IMAGE_ICON, width, height, LR_DEFAULTCOLOR | LR_SHARED);
 }
@@ -1267,6 +1317,19 @@ void LoadAppSettings() {
     GetPrivateProfileStringW(L"Window", L"PosY", L"0", posYBuf, 32, g_configPath);
     g_appSettings.overlayPosX = (float)_wtof(posXBuf);
     g_appSettings.overlayPosY = (float)_wtof(posYBuf);
+    // Before schema 2 the process was DPI unaware and saw primary-monitor coordinates divided by
+    // the display scale; convert them to the physical pixels a DPI-aware process uses.
+    const UINT savedSchemaVersion = GetPrivateProfileIntW(L"Version", L"ConfigSchemaVersion", 0, g_configPath);
+    if (g_appSettings.hasSavedPos && savedSchemaVersion < 2) {
+        g_appSettings.overlayPosX *= g_dpiScale;
+        g_appSettings.overlayPosY *= g_dpiScale;
+        // Persist now, since the schema version below is bumped immediately.
+        wchar_t buf[32];
+        swprintf_s(buf, L"%.1f", g_appSettings.overlayPosX);
+        WriteStringSetting(L"Window", L"PosX", buf);
+        swprintf_s(buf, L"%.1f", g_appSettings.overlayPosY);
+        WriteStringSetting(L"Window", L"PosY", buf);
+    }
     WriteUIntSetting(L"Version", L"ConfigSchemaVersion", kConfigSchemaVersion);
     WriteStringSetting(L"Version", L"LastLaunchedVersion", kCurrentAppVersion);
     SetStartupEnabledInRegistry(g_appSettings.startupEnabled);
@@ -1744,6 +1807,12 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     case WM_SETTINGCHANGE:
     case WM_DISPLAYCHANGE:
+        ApplyOverlayBounds(hWnd);
+        RefreshDpiScale(); // The primary monitor may have changed to one with different scaling.
+        return 0;
+    case WM_DPICHANGED:
+        // Ignore the suggested rect: the overlay always covers the primary work area.
+        RefreshDpiScale();
         ApplyOverlayBounds(hWnd);
         return 0;
     case WM_DESTROY:

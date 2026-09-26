@@ -53,8 +53,8 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
 - `Network`: `PrimaryMode`, `PrimaryIfIndex`, `SecondaryEnabled`, `SecondaryIfIndex`, `DisplayMode`
 - `Temperature`: `Show`, `Fahrenheit`
 - `General`: `StartWithWindows`
-- `Window`: `HasSavedPos`, `PosX`, `PosY` (HUD position after an ALT-drag; written on exit and with any tray change)
-- `Version`: `ConfigSchemaVersion`, `LastLaunchedVersion`
+- `Window`: `HasSavedPos`, `PosX`, `PosY` (HUD position after an ALT-drag, in physical pixels; written on exit and with any tray change)
+- `Version`: `ConfigSchemaVersion` (currently 2; see `dpi_scaling.md` for the 1 -> 2 position migration), `LastLaunchedVersion`
 
 ## Startup Integration
 - Registry path: `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`

@@ -609,3 +609,19 @@
 
 **Immediate Next Steps:**
 - DPI awareness, HUD-sized window.
+
+## 2026-09-26: Per-Monitor DPI Awareness
+
+**Summary of Work Done:**
+- CoreGaze was DPI unaware, so on scaled displays Windows bitmap-stretched the whole overlay and the text was blurry. It now enables per-monitor v2 awareness (`ImGui_ImplWin32_EnableDpiAwareness()`) before creating the window and renders at native resolution.
+- HUD layout constants (font 17px, bars 290x20, default offset 330/30, style paddings) are defined at 96 DPI and multiplied by the primary monitor's scale. The font uses ImGui 1.92's `style.FontScaleDpi`, so glyphs are rasterized at the real size. `ApplyHudStyle()` rebuilds the style from base values.
+- `WM_DPICHANGED`, `WM_DISPLAYCHANGE` and `WM_SETTINGCHANGE` refresh the scale; the style is reapplied between frames.
+- Config schema bumped to 2: saved HUD positions are now physical pixels. Older positions are multiplied by the display scale on load and written back immediately.
+- New doc: `docs/dpi_scaling.md`.
+
+**Current State:**
+- Verified at 125% scaling: bars measure 362px (same physical size as before), text is sharp, and a saved position of `650,47` migrated to `812.5,58.8`.
+- Not yet verified: changing display scaling while CoreGaze runs.
+
+**Immediate Next Steps:**
+- HUD-sized host window.

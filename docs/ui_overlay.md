@@ -6,9 +6,10 @@ The HUD is rendered with Dear ImGui on a transparent, click-through DX11 surface
 - Default state: click-through (`WS_EX_TRANSPARENT`).
 - Hold `ALT`: overlay becomes interactable and movable. The loop wakes every 16ms while `ALT` is held so dragging stays smooth, then returns to the polling interval.
 - Release `ALT`: click-through restored.
-- The dragged position is kept in `[Window]` in `config.ini` and restored on the next launch. Without a saved position (or after the tray's `Reset Overlay Position`), the HUD sits 330px from the right and 30px from the top of the work area.
+- The dragged position is kept in `[Window]` in `config.ini` and restored on the next launch. Without a saved position (or after the tray's `Reset Overlay Position`), the HUD sits 330px from the right and 30px from the top of the work area (at 100% scaling; both scale with DPI).
 - Host window identity uses CoreGaze branding (`CoreGazeClass`, `CoreGaze`).
 - Overlay host bounds are initialized from primary monitor work area (`SPI_GETWORKAREA`) with virtual-screen fallback.
+- The process is per-monitor DPI aware; fonts, bars and spacing scale with the primary monitor's display scaling (see `dpi_scaling.md`).
 - App process enforces single-instance startup; duplicate launches exit immediately.
 
 ## Rendering Principles

@@ -4,8 +4,9 @@ The HUD is rendered with Dear ImGui on a transparent, click-through DX11 surface
 
 ## Interaction Model
 - Default state: click-through (`WS_EX_TRANSPARENT`).
-- Hold `ALT`: overlay becomes interactable and movable.
+- Hold `ALT`: overlay becomes interactable and movable. The loop wakes every 16ms while `ALT` is held so dragging stays smooth, then returns to the polling interval.
 - Release `ALT`: click-through restored.
+- The dragged position is kept in `[Window]` in `config.ini` and restored on the next launch. Without a saved position (or after the tray's `Reset Overlay Position`), the HUD sits 330px from the right and 30px from the top of the work area.
 - Host window identity uses CoreGaze branding (`CoreGazeClass`, `CoreGaze`).
 - Overlay host bounds are initialized from primary monitor work area (`SPI_GETWORKAREA`) with virtual-screen fallback.
 - App process enforces single-instance startup; duplicate launches exit immediately.
@@ -47,6 +48,7 @@ The HUD is rendered with Dear ImGui on a transparent, click-through DX11 surface
   - Aggregate: one combined row
 - Adapter name is rendered next to the `GPU` label.
 - Progress payload includes utilization/engine when available, and memory usage.
+- With `Show Dedicated VRAM` on (default), a purple bar under each GPU row shows dedicated VRAM used/total and percent, with shared memory appended as `+N.NG` when above 0.05 GB. It is hidden for adapters without dedicated memory.
 
 ## Performance Notes
 - HUD rendering uses monitor-provided snapshots only.

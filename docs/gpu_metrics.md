@@ -31,10 +31,11 @@ Tray-selectable modes:
 
 ## Tray Integration
 GPU tray menu now includes:
+- `Show Dedicated VRAM` toggle
 - `Display Mode` submenu
 - `Select GPU Source` submenu (detected adapters)
 
-Both settings are persisted in config and applied live without restart.
+All three settings are persisted in config and applied live without restart.
 
 ## Fallback Behavior
 - If utilization is unavailable for an adapter, memory telemetry still renders.

@@ -262,6 +262,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    // The HUD position lives in config.ini; without this ImGui drops an imgui.ini into the working directory.
+    io.IniFilename = nullptr;
 
     // Load custom font with high-clarity rasterization settings
     ImFontConfig fontConfig;

@@ -9,13 +9,16 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
 - Auto-migrate legacy settings from `%APPDATA%\TaskManagerOverlay\config.ini` on first run when the CoreGaze config file is missing.
 
 ## Core Controls
-- Overlay visibility toggle.
+- Overlay visibility toggle (`Show Overlay`; double-clicking the tray icon does the same).
+- `Reset Overlay Position`: moves the HUD back to the default top-right corner of the work area and clears the saved position.
 - Metric visibility toggles (CPU, RAM, GPU, Disk, Network).
 - Polling cadence (`500ms`, `1000ms`, `2000ms`).
-- Disk drive selection (fixed drives only).
+- Disk drive selection (fixed drives only), plus `Select All` / `Select None`.
 - Launch on Windows startup toggle (HKCU Run key).
+- `Exit / Quit`.
 
 ## GPU Controls
+- `Show Dedicated VRAM`: toggles the VRAM bar under each GPU row.
 - Display mode submenu:
   - Targeted
   - Highest-Load
@@ -46,10 +49,11 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
 - `Display`: `VisibleMask`, `OverlayVisible`
 - `Polling`: `IntervalMs`
 - `Disk`: `SelectedMask`
-- `GPU`: `DisplayMode`, `SelectedAdapterIndex`
+- `GPU`: `DisplayMode`, `SelectedAdapterIndex`, `ShowVram`
 - `Network`: `PrimaryMode`, `PrimaryIfIndex`, `SecondaryEnabled`, `SecondaryIfIndex`, `DisplayMode`
 - `Temperature`: `Show`, `Fahrenheit`
 - `General`: `StartWithWindows`
+- `Window`: `HasSavedPos`, `PosX`, `PosY` (HUD position after an ALT-drag; written on exit and with any tray change)
 - `Version`: `ConfigSchemaVersion`, `LastLaunchedVersion`
 
 ## Startup Integration

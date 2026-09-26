@@ -595,3 +595,17 @@
 
 **Immediate Next Steps:**
 - Stale docs, DPI awareness, HUD-sized window.
+
+## 2026-09-26: Docs Catch-Up and No imgui.ini
+
+**Summary of Work Done:**
+- `system_tray_hub.md` was missing several menu entries: `Reset Overlay Position`, `Show Dedicated VRAM`, disk `Select All`/`Select None`, `Exit / Quit`, and tray-icon double-click. Its persistence list now includes `GPU/ShowVram` and the `[Window]` position keys.
+- `gpu_metrics.md` lists the VRAM toggle; `ui_overlay.md` documents the VRAM bar and how the HUD position is dragged, saved, restored, and reset.
+- Checked the WLAN and disk-counter references: `network_identity.md`, `system_monitor.md`, and `pdh_metrics.md` already match the code.
+- `io.IniFilename = nullptr`: ImGui no longer writes `imgui.ini` into the working directory (the HUD window already used `NoSavedSettings`, and its position lives in `config.ini`). Existing stray `imgui.ini` files can be deleted.
+
+**Current State:**
+- Builds clean.
+
+**Immediate Next Steps:**
+- DPI awareness, HUD-sized window.

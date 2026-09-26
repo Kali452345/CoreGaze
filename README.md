@@ -5,6 +5,8 @@ CoreGaze is a lightweight Windows resource-monitor overlay built with C++, Win32
 ## Features
 - Always-on-top desktop overlay with low-overhead polling cadence.
 - CPU, RAM, GPU, Disk, and Network telemetry.
+- Task Manager-style process window (tray `Processes...` or `Ctrl+Shift+Alt+P`): per-process CPU, memory, GPU, I/O, and (as administrator) disk and network, with sorting, filtering, grouping by name, End task and priority. It costs a small fraction of Task Manager's CPU and memory; see `docs/process_window.md`.
+- Optional administrator mode (`Restart as Administrator`, or `Always Run as Administrator` through a scheduled task); see `docs/elevation.md`.
 - Tray-based runtime controls and persisted settings.
 - Startup management via tray toggle and installer startup checkbox.
 - Single-instance guard and crash diagnostics.

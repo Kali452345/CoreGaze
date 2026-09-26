@@ -90,8 +90,8 @@ public:
     explicit SystemMonitor(ID3D11Device* d3dDevice = nullptr);
     ~SystemMonitor();
     
-    // Call every frame; updates internally only once per 1000ms
-    void Update();
+    // Call every loop iteration; polls only once per polling interval. Returns true when it polled.
+    bool Update();
     void SetPollingIntervalMs(DWORD pollingIntervalMs);
     DWORD GetPollingIntervalMs() const { return m_pollingIntervalMs; }
     void SetEnabledMetricsMask(DWORD enabledMask);

@@ -828,12 +828,14 @@ const char* SystemMonitor::GetNetworkAdapterNameByIndex(UINT index) const {
         : m_networkAdapters[index].adapterName;
 }
 
-void SystemMonitor::Update() {
+bool SystemMonitor::Update() {
     const ULONGLONG currentTime = GetTickCount64();
     if (currentTime - m_lastUpdateTime >= m_pollingIntervalMs) {
         PollMetrics();
         m_lastUpdateTime = currentTime;
+        return true;
     }
+    return false;
 }
 
 void SystemMonitor::PollMetrics() {

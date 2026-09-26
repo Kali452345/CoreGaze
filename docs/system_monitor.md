@@ -22,6 +22,7 @@ The monitor supports runtime control from tray settings:
 - `SetNetworkSecondaryEnabled(...)`, `SetNetworkSecondaryIfIndex(...)`: optional secondary adapter.
 - `SetTemperaturesEnabled(...)`: CPU/GPU/disk temperature polling on or off.
 - `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
+- `Update()` polls when the polling interval has elapsed and returns `true` when it did. The main loop uses the result to draw the HUD only after new data (see `docs/process_window.md`, "Main Loop Integration").
 - `SetProcessGpuTrackingEnabled(...)`: per-process GPU load for the process window, read through `GetProcessGpuUsage(...)`. It keeps the GPU engine query running even when the GPU metric is off. Turning it off frees its buffers. See `docs/process_monitor.md`.
 
 ## CPU and RAM Collection

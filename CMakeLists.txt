@@ -40,7 +40,9 @@ set(SOURCES
     main.cpp
     SystemMonitor.cpp
     ProcessMonitor.cpp
+    ProcessWindow.cpp
     EtwMonitor.cpp
+    Elevation.cpp
     resource.rc
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -82,6 +84,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     wtsapi32
     ws2_32
     advapi32   # ETW (EtwMonitor), token elevation
+    shell32    # ShellExecuteEx, CommandLineToArgvW
+    secur32    # GetUserNameExW for the elevated task
 )
 
 if (WIN32 AND ENABLE_CODE_SIGNING)

@@ -18,6 +18,7 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 ## Config Preservation
 - User settings remain in `%APPDATA%\\CoreGaze\\config.ini`.
 - Uninstall does not delete roaming config by default.
+- Uninstall deletes the `CoreGaze Elevated Startup` scheduled task (created by `Always Run as Administrator`) if it exists. Deleting it needs administrator rights, so a per-user uninstall shows one UAC prompt, and only when the task exists (`CurUninstallStepChanged` in `[Code]`; see `docs/elevation.md`).
 - Runtime one-time migration already supports `%APPDATA%\\TaskManagerOverlay\\config.ini` to `%APPDATA%\\CoreGaze\\config.ini`.
 
 ## Runtime Dependencies

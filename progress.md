@@ -702,3 +702,62 @@
 
 **Immediate Next Steps:**
 - The process window UI, and the elevation paths that turn this on.
+
+## 2026-09-26: Process Manager - Process Window and Administrator Mode
+
+**Summary of Work Done:**
+- New `ProcessWindow` (`ProcessWindow.h/.cpp`): a Task Manager-style process list in its own resizable window.
+  - Open it from the tray (`Processes...`, the default item), with `Ctrl+Shift+Alt+P`, or with `--open-processes`.
+  - Rendering: it shares the HUD's D3D11 device, with its own swap chain and ImGui context.
+  - Table: Name, PID, CPU, Memory, Disk, Network, GPU, GPU engine, I/O, plus hidden-by-default Threads, Handles, Working set, Commit, Session and Parent PID.
+    - Columns can be resized, reordered, hidden and sorted; the layout persists in `processes_table.ini`.
+    - A totals row is pinned under the header, cells get heat tints, and rows are virtualized.
+  - Interaction:
+    - Filter by name or PID (Ctrl+F).
+    - Group by name, with summed values and expandable members.
+    - Keyboard navigation.
+  - Actions:
+    - End task, with a confirmation and a creation-time check against PID reuse; critical processes, System and CoreGaze itself are never ended.
+    - Set priority, Open file location, Properties, and Copy.
+  - Scheduling:
+    - It samples at 0.5 s, 1 s or 2 s, or Paused.
+    - It draws only after a sample or input (capped at 60 fps).
+    - It does nothing while minimized, and frees everything on close.
+- Administrator mode (`Elevation.h/.cpp`):
+  - `Restart as Administrator`, from the tray or the process window toolbar, relaunches through UAC with `--wait-for-pid`.
+  - `Always Run as Administrator` registers an on-demand, highest-privilege scheduled task. Non-elevated starts, including the Run key at sign-in, hand over to it without a prompt; `--from-task` retries the mutex, and `--no-elevate` skips the handoff.
+  - An elevated process window starts the ETW session for the Disk and Network columns.
+  - Tray callbacks are allowed through UIPI when elevated.
+  - The uninstaller deletes the task if it exists.
+- Main loop:
+  - `ProcessWindow::Tick()` sets the wait deadline, and the loop now sleeps until the next poll is actually due.
+  - `SystemMonitor::Update()` returns whether it polled, and the HUD redraws only after a poll or a visible change.
+- CMake: `ProcessWindow.cpp` and `Elevation.cpp` added; `shell32` and `secur32` linked.
+- New docs `docs/process_window.md` and `docs/elevation.md`. Updated: tray hub, global hotkey, startup management, single instance, system monitor, installer, README.
+
+**Current State:**
+- Builds clean (MinGW), and the installer script compiles.
+- Verified non-elevated on the development machine:
+  - Sorting, filtering, grouping and expanding work, as do keyboard navigation and the context menu.
+  - End task was tested on a throwaway `ping.exe`.
+  - Settings persist, the hotkey reopens the window, and closing it frees its resources.
+- Measured, idle, 1 s refresh:
+
+  | | CPU (whole machine) | Private memory |
+  |---|---|---|
+  | HUD only | 0.12% | 20 MB |
+  | HUD + process window | 0.15% | 22 MB |
+  | Task Manager (same moment) | 1.69% | 115 MB |
+
+- **Untested (needs an admin session with the user present):**
+  - ETW Disk and Network columns: plausibility against Resource Monitor, and lost events.
+  - Restart as Administrator.
+  - Always Run as Administrator: task registration, handoff at sign-in, and deletion.
+  - The uninstaller's task removal.
+  - Elevated tray callbacks.
+  - End task on elevated processes.
+- The tray menu's new items were not checked visually: the synthetic tray click could not open the menu from a background process.
+
+**Immediate Next Steps:**
+- Run the admin test pass with the user.
+- Optional: a background cache for friendly names, descriptions and icons (Phase 3).

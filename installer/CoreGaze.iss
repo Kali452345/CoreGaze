@@ -118,3 +118,22 @@ begin
     RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Installed', Installed) and
     (Installed = 1);
 end;
+
+// "Always Run as Administrator" (tray menu) registers this scheduled task. Remove it on uninstall.
+// It is created with the highest run level, so deleting it needs administrator rights: elevate
+// (one UAC prompt, none if the uninstaller is already elevated) only when the task exists.
+const
+  ElevatedTaskName = 'CoreGaze Elevated Startup';
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+  Schtasks: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    Schtasks := ExpandConstant('{sys}\schtasks.exe');
+    if Exec(Schtasks, '/Query /TN "' + ElevatedTaskName + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
+      ShellExec('runas', Schtasks, '/Delete /TN "' + ElevatedTaskName + '" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;

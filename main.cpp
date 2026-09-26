@@ -13,6 +13,8 @@
 #include <math.h>
 #include <wchar.h>
 #include "SystemMonitor.h"
+#include "ProcessWindow.h"
+#include "Elevation.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -56,6 +58,10 @@ static const float kHudBarHeight = 20.0f;
 static const float kHudDefaultRightOffset = 330.0f;
 static const float kHudDefaultTopOffset = 30.0f;
 static const int kOverlayHotkeyId = 0x0C0E;
+// Ctrl+Shift+Alt+P opens the process window (Ctrl+Shift+P alone belongs to editors and browsers).
+static const int kProcessesHotkeyId = 0x0C0F;
+static const UINT kProcessesHotkeyModifiers = MOD_CONTROL | MOD_SHIFT | MOD_ALT | MOD_NOREPEAT;
+static const UINT kProcessesHotkeyVirtualKey = 'P';
 static const UINT kOverlayHotkeyModifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
 static const UINT kOverlayHotkeyVirtualKey = 'O';
 // Thermal zones have no reported limits, so CPU thresholds are fixed. GPU and disk thresholds come
@@ -71,6 +77,7 @@ enum TrayCommandId : UINT {
     ID_TRAY_SHOW_DISK = 5005,
     ID_TRAY_SHOW_NETWORK = 5006,
     ID_TRAY_RESET_POSITION = 5007,
+    ID_TRAY_PROCESSES = 5008,
     ID_TRAY_POLL_500 = 5101,
     ID_TRAY_POLL_1000 = 5102,
     ID_TRAY_POLL_2000 = 5103,
@@ -93,6 +100,8 @@ enum TrayCommandId : UINT {
     ID_TRAY_TEMPERATURE_CELSIUS = 5702,
     ID_TRAY_TEMPERATURE_FAHRENHEIT = 5703,
     ID_TRAY_STARTUP_TOGGLE = 5901,
+    ID_TRAY_RESTART_ELEVATED = 5902,
+    ID_TRAY_ALWAYS_ELEVATED = 5903,
     ID_TRAY_EXIT = 5999
 };
 
@@ -112,6 +121,7 @@ struct AppSettings {
     BOOL showTemperatures;
     BOOL temperatureFahrenheit;
     BOOL startupEnabled;
+    BOOL alwaysElevated;      // start through the elevated scheduled task (see Elevation.h)
     float overlayPosX;
     float overlayPosY;
     BOOL hasSavedPos;
@@ -133,6 +143,7 @@ static AppSettings g_appSettings = {
     TRUE,
     FALSE,
     FALSE,
+    FALSE,
     0.0f,
     0.0f,
     FALSE
@@ -145,6 +156,13 @@ static HANDLE g_singleInstanceMutex = NULL;
 // The HUD always lives on the primary monitor's work area, so one scale factor covers it.
 static float g_dpiScale = 1.0f;
 static bool g_dpiScaleChanged = false;
+// The HUD is redrawn only after a poll or when something visible changed (settings, display,
+// resume); the main loop also wakes for the process window, which must not redraw the HUD.
+static bool g_hudDirty = true;
+static ProcessWindow g_processWindow;
+static HINSTANCE g_instance = NULL;
+static HICON g_appIconLarge = NULL;
+static HICON g_appIconSmall = NULL;
 
 static wchar_t g_discoveredGpuNames[8][128] = {};
 static UINT g_discoveredGpuCount = 0;
@@ -192,6 +210,11 @@ static LONG WINAPI CoreGazeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptio
 static void WriteStringSetting(const wchar_t* section, const wchar_t* key, const wchar_t* value);
 static void CleanupSingleInstanceMutex();
 static void RemoveLegacyExecutableIfPresent();
+static bool AcquireSingleInstanceMutex(DWORD retryMs);
+static void OpenProcessWindow(HWND hwnd);
+static void RestartElevated(HWND hwnd);
+static void ToggleAlwaysElevated(HWND hwnd);
+static void RefreshElevatedTaskPath();
 static void FormatNetworkRateMbps(float mbps, char* output, int outputSize);
 static void FormatDiskRateKBps(float kbps, char* output, int outputSize);
 static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImVec4& baseColor);
@@ -202,16 +225,15 @@ static float ComputeAdaptiveNetworkProgress(float mbps, float* ceilingMbps, int*
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-    g_singleInstanceMutex = CreateMutexW(NULL, FALSE, kSingleInstanceMutexName);
-    if (g_singleInstanceMutex == NULL) {
-        return 1;
-    }
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(g_singleInstanceMutex);
-        g_singleInstanceMutex = NULL;
+    // An instance that restarted us (as administrator) is still shutting down: wait for it.
+    WaitForPreviousInstanceFromCommandLine();
+    // The elevated scheduled task is started by a non-elevated instance that exits right after.
+    const bool startedFromTask = HasCommandLineFlag(L"--from-task");
+    if (!AcquireSingleInstanceMutex(startedFromTask ? 5000 : 0)) {
         return 0;
     }
 
+    g_instance = hInstance;
     InitializeConfigPath();
     InitializeDiagnosticsPath();
     SetUnhandledExceptionFilter(CoreGazeUnhandledExceptionFilter);
@@ -227,6 +249,25 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     LoadAppSettings();
 
+    // "Always run as administrator": a non-elevated start (Run key at sign-in, Start menu) hands over
+    // to the elevated scheduled task, which starts without a UAC prompt. If that fails, carry on
+    // without administrator rights.
+    const bool elevated = IsProcessElevated();
+    if (g_appSettings.alwaysElevated && !elevated && !startedFromTask && !HasCommandLineFlag(L"--no-elevate")) {
+        CleanupSingleInstanceMutex();
+        if (RunElevatedTask()) {
+            CoUninitialize();
+            return 0;
+        }
+        if (!AcquireSingleInstanceMutex(0)) {
+            CoUninitialize();
+            return 0;
+        }
+    }
+    if (g_appSettings.alwaysElevated && elevated) {
+        RefreshElevatedTaskPath();
+    }
+
     // Create application window
     // WS_EX_TOPMOST: Always on top
     // WS_EX_LAYERED: Allows transparency
@@ -241,6 +282,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     if (appIconSmall == NULL) {
         appIconSmall = appIconLarge;
     }
+    g_appIconLarge = appIconLarge;
+    g_appIconSmall = appIconSmall;
 
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, appIconLarge, nullptr, nullptr, nullptr, kWindowClassName, appIconSmall };
     ::RegisterClassExW(&wc);
@@ -317,9 +360,21 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         kOverlayHotkeyId,
         kOverlayHotkeyModifiers,
         kOverlayHotkeyVirtualKey);
+    const BOOL processesHotkeyRegistered = RegisterHotKey(
+        hwnd,
+        kProcessesHotkeyId,
+        kProcessesHotkeyModifiers,
+        kProcessesHotkeyVirtualKey);
+
+    if (HasCommandLineFlag(L"--open-processes")) {
+        OpenProcessWindow(hwnd);
+    }
 
     bool hudDragging = false;
+    bool wasAltHeld = false;
     POINT hudDragOffset = {};
+    ULONGLONG lastPollTick = 0;
+    DWORD processWindowWait = INFINITE;
 
     // Main loop
     bool done = false;
@@ -336,8 +391,14 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 16, QS_ALLINPUT);
         } else {
             // Active Idle Sleep check for iGPU optimization: 
-            // Sleep until either a new window message arrives, or the polling loop hits.
-            MsgWaitForMultipleObjects(0, nullptr, FALSE, g_appSettings.pollingIntervalMs, QS_ALLINPUT);
+            // Sleep until a window message arrives, the next poll is due, or the process window
+            // (if open) needs to sample or draw.
+            const ULONGLONG sincePoll = GetTickCount64() - lastPollTick;
+            DWORD timeout = (sincePoll >= g_appSettings.pollingIntervalMs) ? 0 : (DWORD)(g_appSettings.pollingIntervalMs - sincePoll);
+            if (processWindowWait < timeout) {
+                timeout = processWindowWait;
+            }
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, timeout, QS_ALLINPUT);
         }
 
         // Poll and handle messages (inputs, window resize, etc.)
@@ -346,6 +407,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         {
             if (msg.message == WM_HOTKEY && msg.wParam == (WPARAM)kOverlayHotkeyId) {
                 HandleTrayCommand(hwnd, ID_TRAY_TOGGLE_OVERLAY);
+                continue;
+            }
+            if (msg.message == WM_HOTKEY && msg.wParam == (WPARAM)kProcessesHotkeyId) {
+                OpenProcessWindow(hwnd);
                 continue;
             }
 
@@ -378,11 +443,26 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         }
 
         // Update hardware metrics (internally throttled to polling interval)
-        sysMonitor.Update();
+        const bool polled = sysMonitor.Update();
+        if (polled) {
+            lastPollTick = GetTickCount64();
+        }
+
+        // The process window samples and draws on its own schedule; Tick says when it next needs to run.
+        processWindowWait = g_processWindow.IsOpen() ? g_processWindow.Tick() : INFINITE;
 
         if (!g_appSettings.overlayVisible) {
             continue;
         }
+
+        // Skip HUD frames when nothing it shows has changed (e.g. the loop woke for the process window).
+        const bool hudNeedsFrame = polled || g_hudDirty || isAltHeld || wasAltHeld || hudDragging ||
+                                   g_dpiScaleChanged || g_ResizeWidth != 0;
+        wasAltHeld = isAltHeld;
+        if (!hudNeedsFrame) {
+            continue;
+        }
+        g_hudDirty = false;
 
         // Display scaling changed (WM_DPICHANGED); restyle between frames.
         if (g_dpiScaleChanged) {
@@ -717,6 +797,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             (clientRect.right != hudWidth || clientRect.bottom != hudHeight)) {
             SetWindowPos(hwnd, NULL, 0, 0, hudWidth, hudHeight, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
             ApplyOverlayBounds(hwnd); // A taller HUD near the bottom edge is pushed back inside the work area.
+            g_hudDirty = true; // auto-resizing settles over a second frame
         }
         if (g_ResizeWidth != 0 && g_ResizeHeight != 0)
         {
@@ -736,10 +817,14 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     }
 
     // Cleanup
+    g_processWindow.Close(); // before the shared D3D device and the HUD's ImGui context go away
     SaveAppSettings();
     CleanupTrayIcon();
     if (hotkeyRegistered) {
         UnregisterHotKey(hwnd, kOverlayHotkeyId);
+    }
+    if (processesHotkeyRegistered) {
+        UnregisterHotKey(hwnd, kProcessesHotkeyId);
     }
     if (g_powerNotify != NULL) {
         UnregisterPowerSettingNotification(g_powerNotify);
@@ -1339,6 +1424,7 @@ void LoadAppSettings() {
     g_appSettings.temperatureFahrenheit = GetPrivateProfileIntW(L"Temperature", L"Fahrenheit", 0, g_configPath) ? TRUE : FALSE;
     BOOL startupRegistryEnabled = IsStartupEnabledInRegistry() ? TRUE : FALSE;
     g_appSettings.startupEnabled = GetPrivateProfileIntW(L"General", L"StartWithWindows", startupRegistryEnabled ? 1 : 0, g_configPath) ? TRUE : FALSE;
+    g_appSettings.alwaysElevated = GetPrivateProfileIntW(L"General", L"AlwaysElevated", 0, g_configPath) ? TRUE : FALSE;
     g_appSettings.hasSavedPos = GetPrivateProfileIntW(L"Window", L"HasSavedPos", 0, g_configPath) ? TRUE : FALSE;
     wchar_t posXBuf[32] = {}, posYBuf[32] = {};
     GetPrivateProfileStringW(L"Window", L"PosX", L"0", posXBuf, 32, g_configPath);
@@ -1368,6 +1454,7 @@ void LoadAppSettings() {
 void SaveAppSettings() {
     WriteUIntSetting(L"Display", L"VisibleMask", g_appSettings.visibleMetricsMask & SYSTEM_METRIC_ALL);
     WriteUIntSetting(L"Display", L"OverlayVisible", g_appSettings.overlayVisible ? 1u : 0u);
+    WriteUIntSetting(L"General", L"AlwaysElevated", g_appSettings.alwaysElevated ? 1u : 0u);
     WriteUIntSetting(L"Disk", L"SelectedMask", g_appSettings.diskSelectionMask & 0x03FFFFFFu);
     WriteUIntSetting(L"Polling", L"IntervalMs", NormalizePollingRate(g_appSettings.pollingIntervalMs));
     WriteUIntSetting(L"GPU", L"DisplayMode", NormalizeGpuDisplayMode(g_appSettings.gpuDisplayMode));
@@ -1421,6 +1508,7 @@ void ApplyRuntimeSettings(HWND hwnd) {
     }
 
     ShowWindow(hwnd, g_appSettings.overlayVisible ? SW_SHOWNA : SW_HIDE);
+    g_hudDirty = true;
 }
 
 void InitializeTrayIcon(HWND hwnd, HINSTANCE hInstance) {
@@ -1435,6 +1523,9 @@ void InitializeTrayIcon(HWND hwnd, HINSTANCE hInstance) {
         g_trayIconData.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     }
     wcscpy_s(g_trayIconData.szTip, kTrayTooltip);
+    // When CoreGaze runs elevated, UIPI drops messages from the (non-elevated) Explorer that owns the
+    // notification area; allow the tray callback through.
+    ChangeWindowMessageFilterEx(hwnd, WM_TRAYICON, MSGFLT_ALLOW, NULL);
     Shell_NotifyIconW(NIM_ADD, &g_trayIconData);
 }
 
@@ -1594,6 +1685,18 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
     case ID_TRAY_STARTUP_TOGGLE:
         g_appSettings.startupEnabled = g_appSettings.startupEnabled ? FALSE : TRUE;
         break;
+    case ID_TRAY_PROCESSES:
+        settingsChanged = false;
+        OpenProcessWindow(hwnd);
+        break;
+    case ID_TRAY_RESTART_ELEVATED:
+        settingsChanged = false;
+        RestartElevated(hwnd);
+        break;
+    case ID_TRAY_ALWAYS_ELEVATED:
+        settingsChanged = false;
+        ToggleAlwaysElevated(hwnd);
+        break;
     case ID_TRAY_EXIT:
         settingsChanged = false;
         DestroyWindow(hwnd);
@@ -1655,6 +1758,9 @@ void ShowTrayContextMenu(HWND hwnd) {
     HMENU networkDisplayMenu = CreatePopupMenu();
     HMENU temperatureMenu = CreatePopupMenu();
 
+    AppendMenuW(rootMenu, MF_STRING, ID_TRAY_PROCESSES, L"Processes...\tCtrl+Shift+Alt+P");
+    SetMenuDefaultItem(rootMenu, ID_TRAY_PROCESSES, FALSE);
+    AppendMenuW(rootMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag(g_appSettings.overlayVisible), ID_TRAY_TOGGLE_OVERLAY, L"Show Overlay");
     AppendMenuW(rootMenu, MF_STRING, ID_TRAY_RESET_POSITION, L"Reset Overlay Position");
     AppendMenuW(rootMenu, MF_SEPARATOR, 0, NULL);
@@ -1749,6 +1855,10 @@ void ShowTrayContextMenu(HWND hwnd) {
 
     AppendMenuW(rootMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag(g_appSettings.startupEnabled), ID_TRAY_STARTUP_TOGGLE, L"Launch on Windows Startup");
+    AppendMenuW(rootMenu, MF_STRING | CheckedFlag(g_appSettings.alwaysElevated), ID_TRAY_ALWAYS_ELEVATED, L"Always Run as Administrator");
+    if (!IsProcessElevated()) {
+        AppendMenuW(rootMenu, MF_STRING, ID_TRAY_RESTART_ELEVATED, L"Restart as Administrator");
+    }
     AppendMenuW(rootMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(pollingMenu, MF_STRING | CheckedFlag(g_appSettings.pollingIntervalMs == 500), ID_TRAY_POLL_500, L"500ms (High precision)");
     AppendMenuW(pollingMenu, MF_STRING | CheckedFlag(g_appSettings.pollingIntervalMs == 1000), ID_TRAY_POLL_1000, L"1000ms (Balanced)");
@@ -1779,6 +1889,9 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     switch (msg)
     {
+    case WM_COREGAZE_RESTART_ELEVATED:
+        RestartElevated(hWnd);
+        return 0;
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
             ShowTrayContextMenu(hWnd);
@@ -1798,6 +1911,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_isSuspended = true;
         } else if (wParam == WTS_SESSION_UNLOCK) {
             g_isSuspended = false;
+            g_hudDirty = true;
             if (g_systemMonitor != nullptr) {
                 g_systemMonitor->RefreshNetworkIdentityNow();
                 g_systemMonitor->RequestDiskTopologyRefresh();
@@ -1809,6 +1923,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_isSuspended = true;
         } else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
             g_isSuspended = false;
+            g_hudDirty = true;
             if (g_systemMonitor != nullptr) {
                 g_systemMonitor->RefreshNetworkIdentityNow();
                 g_systemMonitor->RequestDiskTopologyRefresh();
@@ -1819,6 +1934,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 DWORD displayState = *(DWORD*)pbs->Data;
                 // 0 = off, 1 = on, 2 = dimmed
                 g_isSuspended = (displayState == 0);
+                g_hudDirty = true;
                 if (!g_isSuspended && g_systemMonitor != nullptr) {
                     g_systemMonitor->RefreshNetworkIdentityNow();
                     g_systemMonitor->RequestDiskTopologyRefresh();
@@ -1840,6 +1956,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DISPLAYCHANGE:
         ApplyOverlayBounds(hWnd);
         RefreshDpiScale(); // The primary monitor may have changed to one with different scaling.
+        g_hudDirty = true;
         return 0;
     case WM_DPICHANGED:
         // Ignore the suggested rect: the overlay always covers the primary work area.
@@ -1852,4 +1969,103 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-}
+}
+
+static bool AcquireSingleInstanceMutex(DWORD retryMs) {
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        g_singleInstanceMutex = CreateMutexW(NULL, FALSE, kSingleInstanceMutexName);
+        if (g_singleInstanceMutex == NULL) {
+            return false;
+        }
+        if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            return true;
+        }
+        CloseHandle(g_singleInstanceMutex);
+        g_singleInstanceMutex = NULL;
+        if (GetTickCount64() - start >= retryMs) {
+            return false;
+        }
+        Sleep(100);
+    }
+}
+
+static void OpenProcessWindow(HWND hwnd) {
+    if (!g_processWindow.Open(g_instance, g_pd3dDevice, g_pd3dDeviceContext, g_systemMonitor, hwnd,
+                              g_configPath, g_appIconLarge, g_appIconSmall)) {
+        MessageBoxW(NULL, L"The process window could not be opened.", kWindowTitle, MB_OK | MB_ICONWARNING);
+    }
+}
+
+// Starts an elevated copy (UAC prompt) that waits for this instance to exit, then exits.
+static void RestartElevated(HWND hwnd) {
+    if (IsProcessElevated()) {
+        return;
+    }
+    DWORD error = ERROR_SUCCESS;
+    if (RelaunchElevated(g_processWindow.IsOpen() ? L"--open-processes" : L"", &error)) {
+        DestroyWindow(hwnd);
+    } else if (error != ERROR_CANCELLED) {
+        wchar_t text[160];
+        swprintf_s(text, L"CoreGaze could not restart as administrator (error %lu).", error);
+        MessageBoxW(NULL, text, kWindowTitle, MB_OK | MB_ICONWARNING);
+    }
+}
+
+static void ToggleAlwaysElevated(HWND hwnd) {
+    DWORD error = ERROR_SUCCESS;
+    if (g_appSettings.alwaysElevated) {
+        // Declining the UAC prompt keeps the task (and the setting). Any other failure most likely
+        // means the task is already gone.
+        if (!DeleteElevatedTask(&error) && error == ERROR_CANCELLED) {
+            return;
+        }
+        g_appSettings.alwaysElevated = FALSE;
+        WriteStringSetting(L"General", L"AlwaysElevatedPath", NULL);
+        SaveAppSettings();
+        return;
+    }
+
+    if (!RegisterElevatedTask(&error)) {
+        if (error != ERROR_CANCELLED) {
+            wchar_t text[200];
+            swprintf_s(text, L"CoreGaze could not create its administrator start-up task (error %lu).", error);
+            MessageBoxW(NULL, text, kWindowTitle, MB_OK | MB_ICONWARNING);
+        }
+        return;
+    }
+    g_appSettings.alwaysElevated = TRUE;
+    wchar_t modulePath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, modulePath, MAX_PATH) > 0) {
+        WriteStringSetting(L"General", L"AlwaysElevatedPath", modulePath);
+    }
+    SaveAppSettings();
+
+    if (!IsProcessElevated() &&
+        MessageBoxW(NULL, L"CoreGaze will run as administrator from its next start.\n\nRestart it as administrator now?",
+                    kWindowTitle, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        // The task instance waits (--from-task) for this one to release the single-instance mutex.
+        if (RunElevatedTask()) {
+            DestroyWindow(hwnd);
+        } else {
+            RestartElevated(hwnd);
+        }
+    }
+}
+
+// The task stores the executable path; re-register it (no prompt: we are elevated) if CoreGaze moved.
+static void RefreshElevatedTaskPath() {
+    wchar_t modulePath[MAX_PATH];
+    wchar_t registeredPath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, modulePath, MAX_PATH) == 0) {
+        return;
+    }
+    GetPrivateProfileStringW(L"General", L"AlwaysElevatedPath", L"", registeredPath, MAX_PATH, g_configPath);
+    if (_wcsicmp(modulePath, registeredPath) == 0) {
+        return;
+    }
+    DWORD error = ERROR_SUCCESS;
+    if (RegisterElevatedTask(&error)) {
+        WriteStringSetting(L"General", L"AlwaysElevatedPath", modulePath);
+    }
+}

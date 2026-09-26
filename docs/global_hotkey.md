@@ -4,12 +4,16 @@ CoreGaze now supports a global visibility toggle hotkey using Win32 hotkey regis
 
 ## Hotkey Binding
 
-Default binding:
-- `Ctrl + Shift + O`
-
-Registration values:
-- Modifiers: `MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT`
-- Virtual key: `'O'`
+Default bindings:
+- `Ctrl + Shift + O`: toggle the overlay.
+  - Modifiers: `MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT`
+  - Virtual key: `'O'`
+  - Id: `kOverlayHotkeyId` (`0x0C0E`)
+- `Ctrl + Shift + Alt + P`: open (or bring to front) the process window (`docs/process_window.md`).
+  - Modifiers: `MOD_CONTROL | MOD_SHIFT | MOD_ALT | MOD_NOREPEAT`
+  - Virtual key: `'P'`
+  - Id: `kProcessesHotkeyId` (`0x0C0F`)
+  - `Ctrl + Shift + P` alone was avoided because editors (command palette) and browsers (private window) use it, and a registered hotkey would take it from them system-wide.
 
 ## Integration Points
 
@@ -21,12 +25,11 @@ Startup integration:
 
 Message pump integration:
 - The existing `MsgWaitForMultipleObjects` + `PeekMessage` loop checks for `WM_HOTKEY`.
-- When the registered hotkey ID arrives, CoreGaze calls:
-  - `HandleTrayCommand(hwnd, ID_TRAY_TOGGLE_OVERLAY)`
-- This reuses the same overlay visibility path as the tray menu toggle.
+- When the overlay hotkey ID arrives, CoreGaze calls `HandleTrayCommand(hwnd, ID_TRAY_TOGGLE_OVERLAY)`. This reuses the same overlay visibility path as the tray menu toggle.
+- When the processes hotkey ID arrives, CoreGaze calls `OpenProcessWindow(hwnd)`, the same path as the tray's `Processes...` item.
 
 Shutdown integration:
-- `UnregisterHotKey` is called during application cleanup when hotkey registration was successful.
+- `UnregisterHotKey` is called during application cleanup for each hotkey whose registration succeeded. If another program already owns a combination, that hotkey is simply unavailable; the tray menu still works.
 
 ## Behavior and Overhead
 

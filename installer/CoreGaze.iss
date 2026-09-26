@@ -22,9 +22,15 @@
   #define SetupSuffix "-vcredist"
 #endif
 
-; build-installer.ps1 passes /DMyAppVersion=<version>; this is only the fallback.
+; build-installer.ps1 passes /DMyAppVersion=<version>. When compiled directly, the version is read
+; from the built exe (whose VERSIONINFO comes from COREGAZE_VERSION in CMakeLists.txt).
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define VerMajor
+  #define VerMinor
+  #define VerPatch
+  #define VerBuild
+  #expr GetVersionComponents(AddBackslash(SourcePath) + "..\build\CoreGaze.exe", VerMajor, VerMinor, VerPatch, VerBuild)
+  #define MyAppVersion Str(VerMajor) + "." + Str(VerMinor) + "." + Str(VerPatch)
 #endif
 
 [Setup]

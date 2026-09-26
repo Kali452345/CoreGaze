@@ -85,6 +85,8 @@ $resolvedBuildDirectory = Resolve-Path -Path $BuildDirectory -ErrorAction Silent
 if ($null -eq $resolvedBuildDirectory) {
     New-Item -Path $BuildDirectory -ItemType Directory -Force | Out-Null
     $resolvedBuildDirectory = Resolve-Path -Path $BuildDirectory
+}
+
 $w64DevkitBin = "$env:LOCALAPPDATA\w64devkit\bin"
 if (Test-Path $w64DevkitBin) {
     if ($env:PATH -notlike "*$w64DevkitBin*") {
@@ -103,7 +105,9 @@ catch {
 $cachePath = Join-Path -Path $resolvedBuildDirectory.Path -ChildPath "CMakeCache.txt"
 if (-not (Test-Path -Path $cachePath)) {
     Write-Host "Configuring CMake project (Release)..."
-    & $resolvedCMakePath -S $resolvedSourceDirectory.Path -B $resolvedBuildDirectory.Path -DCMAKE_BUILD_TYPE=Release
+    # MinGW links the C++ runtime statically; the installer no longer bundles the VC++ redistributable
+    # that an MSVC (default Visual Studio generator) build would need.
+    & $resolvedCMakePath -S $resolvedSourceDirectory.Path -B $resolvedBuildDirectory.Path -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
     if ($LASTEXITCODE -ne 0) {
         Write-Error "CMake configure failed with exit code $LASTEXITCODE"
         exit $LASTEXITCODE

@@ -3,7 +3,8 @@ param(
     [string]$InstallerScriptPath = "$PSScriptRoot\..\installer\CoreGaze.iss",
     [switch]$PerUserInstall,
     [switch]$BuildFirst,
-    [string]$Version = "1.0.0"
+    # Defaults to the version baked into CoreGaze.exe (COREGAZE_VERSION in CMakeLists.txt).
+    [string]$Version = ""
 )
 
 Set-StrictMode -Version Latest
@@ -88,6 +89,17 @@ if (-not (Test-Path $exePath)) {
     Write-Error "CoreGaze.exe not found at '$exePath'. Run build-release.ps1 first, or pass -BuildFirst."
     exit 1
 }
+
+# ─── Resolve version from the exe so the installer can never disagree with it ─
+$exeVersionInfo = (Get-Item $exePath).VersionInfo
+$exeVersion = "{0}.{1}.{2}" -f $exeVersionInfo.FileMajorPart, $exeVersionInfo.FileMinorPart, $exeVersionInfo.FileBuildPart
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = $exeVersion
+} elseif ($Version -ne $exeVersion) {
+    Write-Error "Requested version '$Version' does not match CoreGaze.exe ($exeVersion). Rebuild with: cmake -S . -B build `"-DCOREGAZE_VERSION=$Version`""
+    exit 1
+}
+Write-Host "Installer version: $Version"
 
 # ─── Resolve ISCC.exe (auto-install if missing) ───────────────────────────────
 $iscc = Resolve-InnoCompilerPath -RequestedPath $InnoCompilerPath

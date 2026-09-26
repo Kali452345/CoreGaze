@@ -35,8 +35,10 @@ This builds `build/CoreGaze.exe` in release mode and produces the installer unde
 
 ## Installer Only
 ```powershell
-./scripts/build-installer.ps1 -Version 1.0.0
+./scripts/build-installer.ps1
 ```
+
+The installer takes its version from `build/CoreGaze.exe`. The version itself lives in one place, `COREGAZE_VERSION` in `CMakeLists.txt`; override it per build with `cmake -S . -B build "-DCOREGAZE_VERSION=1.2.3"` (keep the quotes in PowerShell).
 
 During setup, you can enable the installer task "Start CoreGaze automatically when I sign in" to configure startup immediately.
 

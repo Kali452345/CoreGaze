@@ -38,7 +38,11 @@ static const char* kHudWindowTitle = "CoreGaze";
 static const wchar_t* kSingleInstanceMutexName = L"Local\\CoreGaze.SingleInstance";
 static const wchar_t* kStartupRegistryPath = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const wchar_t* kStartupRegistryValueName = L"CoreGaze";
-static const wchar_t* kCurrentAppVersion = L"1.0.0";
+// The version comes from COREGAZE_VERSION in CMakeLists.txt; the fallback only marks non-CMake builds.
+#ifndef COREGAZE_VERSION_TEXT
+#define COREGAZE_VERSION_TEXT "0.0.0-dev"
+#endif
+static const wchar_t* kCurrentAppVersion = L"" COREGAZE_VERSION_TEXT;
 static const DWORD kConfigSchemaVersion = 1;
 static const int kOverlayHotkeyId = 0x0C0E;
 static const UINT kOverlayHotkeyModifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
@@ -891,7 +895,7 @@ static LONG WINAPI CoreGazeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptio
         char reportText[1024] = {};
         int textLength = snprintf(reportText, sizeof(reportText),
             "CoreGaze crash diagnostic\r\n"
-            "Version: 1.0.0\r\n"
+            "Version: " COREGAZE_VERSION_TEXT "\r\n"
             "ExceptionCode: 0x%08lX\r\n"
             "ExceptionAddress: %p\r\n"
             "ThreadId: %lu\r\n",

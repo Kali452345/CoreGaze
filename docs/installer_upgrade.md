@@ -25,7 +25,9 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 - `build-installer.ps1` always passes `/DNoVcRedistBundle`. The `.iss` still contains the optional VC++ bootstrap entries, enabled only with `/DIncludeVcRedist=1` if the project ever switches to MSVC.
 
 ## Build Integration
-- `build-installer.ps1 -Version <x.y.z>` passes `/DMyAppVersion=<x.y.z>` to Inno Setup. `CoreGaze.iss` only falls back to its built-in `1.0.0` when no version is passed.
+- The version has a single source: `COREGAZE_VERSION` in `CMakeLists.txt` (default `1.0.0`, overridable with `-DCOREGAZE_VERSION=x.y.z`). CMake splits it into the exe's `VERSIONINFO` and the `COREGAZE_VERSION_TEXT` string that `main.cpp` uses for update checks and crash reports.
+- `build-installer.ps1` reads the version from `build\CoreGaze.exe` and passes it as `/DMyAppVersion`. `-Version <x.y.z>` is optional and only acts as a check: the script fails if it differs from the exe.
+- Compiling `CoreGaze.iss` directly (without `/DMyAppVersion`) reads the version from `..\build\CoreGaze.exe` via `GetVersionComponents`.
 - `scripts/build-installer.ps1` auto-detects `iscc.exe` from PATH, known install folders, or registry installs, and offers a winget install when missing.
 - One-command unsigned release flow (build + installer):
 	- `./scripts/build-release.ps1`
@@ -48,4 +50,4 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 	- builds `CoreGaze.exe` with the runner's MinGW-w64 toolchain (`MinGW Makefiles` generator)
 	- compiles the installer with the tag's version (`v1.2.3` -> `1.2.3`)
 	- publishes `CoreGaze-Setup-<version>.exe` to GitHub Releases
-- Note: the executable's own `VERSIONINFO` still comes from `COREGAZE_VERSION_*` in `CMakeLists.txt`, so bump those alongside the tag.
+- The workflow configures CMake with `-DCOREGAZE_VERSION=<tag version>`, so the exe, the update check, and the installer all carry the tag's version with no manual bump.

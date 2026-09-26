@@ -580,3 +580,18 @@
 
 **Immediate Next Steps:**
 - Single version source, stale docs, DPI awareness, HUD-sized window.
+
+## 2026-09-26: Single Version Source
+
+**Summary of Work Done:**
+- The version lived in four places (`CMakeLists.txt` `COREGAZE_VERSION_*`, `kCurrentAppVersion` and the crash-report string in `main.cpp`, the `.iss` fallback, the `build-installer.ps1` default). It now lives only in `COREGAZE_VERSION` in `CMakeLists.txt` (default `1.0.0`, overridable with `-DCOREGAZE_VERSION=x.y.z`). CMake validates it, splits it into the `VERSIONINFO` components, and passes `COREGAZE_VERSION_TEXT` to C++ code.
+- `build-installer.ps1` reads the version from `build\CoreGaze.exe`; `-Version` is now an optional check that fails on mismatch. Compiling `CoreGaze.iss` directly reads the version from the exe with `GetVersionComponents`.
+- The release workflow passes the tag's version to CMake, so tagging `v1.2.3` produces an exe, update check, and installer that all say 1.2.3.
+- `build-release.ps1` fixed: a missing `}` (since `132af76`) meant the script failed to parse, so the one-command release did not run at all. Its configure step also now selects `MinGW Makefiles`, matching CI and the static-runtime installer (the default generator could pick MSVC).
+
+**Current State:**
+- Verified: a `-DCOREGAZE_VERSION=1.2.3` build has FileVersion `1.2.3.0` and "Version: 1.2.3" in the crash-report text; `build-installer.ps1` produces `CoreGaze-Setup-1.0.0.exe` from a 1.0.0 exe and rejects `-Version 9.9.9`; ISCC without `/DMyAppVersion` produces a 1.0.0 installer.
+- In PowerShell the `-D` argument must be quoted as a whole (`"-DCOREGAZE_VERSION=1.2.3"`); unquoted, it is split at the first dot and CMake reports a bad version.
+
+**Immediate Next Steps:**
+- Stale docs, DPI awareness, HUD-sized window.

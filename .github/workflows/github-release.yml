@@ -51,7 +51,9 @@ jobs:
           # MinGW links the C++ runtime statically, so the installer needs no VC++ redistributable.
           $env:PATH = "C:\mingw64\bin;$env:PATH"
           g++ --version
-          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+          # The tag's version is stamped into the exe; build-installer.ps1 checks it matches.
+          # Quote the whole -D argument: PowerShell otherwise splits "-DNAME=1.2.3" at the first dot.
+          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release "-DCOREGAZE_VERSION=${{ steps.resolve_tag.outputs.version }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

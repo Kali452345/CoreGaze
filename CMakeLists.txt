@@ -4,10 +4,20 @@ project(CoreGaze CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(COREGAZE_VERSION_MAJOR 1)
-set(COREGAZE_VERSION_MINOR 0)
-set(COREGAZE_VERSION_PATCH 0)
+# Single source of truth for the app version. It feeds the exe's VERSIONINFO, the version string
+# in main.cpp, and (read back from the exe) the installer. Release CI overrides it from the tag
+# with -DCOREGAZE_VERSION=<x.y.z>.
+if (NOT DEFINED COREGAZE_VERSION)
+    set(COREGAZE_VERSION "1.0.0")
+endif()
+if (NOT COREGAZE_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    message(FATAL_ERROR "COREGAZE_VERSION must start with major.minor.patch (got '${COREGAZE_VERSION}')")
+endif()
+set(COREGAZE_VERSION_MAJOR ${CMAKE_MATCH_1})
+set(COREGAZE_VERSION_MINOR ${CMAKE_MATCH_2})
+set(COREGAZE_VERSION_PATCH ${CMAKE_MATCH_3})
 set(COREGAZE_VERSION_BUILD 0)
+message(STATUS "CoreGaze version: ${COREGAZE_VERSION}")
 
 option(ENABLE_CODE_SIGNING "Sign CoreGaze executable after build" OFF)
 set(COREGAZE_SIGNTOOL "signtool.exe" CACHE STRING "Path to signtool executable")
@@ -47,6 +57,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     COREGAZE_VERSION_MINOR=${COREGAZE_VERSION_MINOR}
     COREGAZE_VERSION_PATCH=${COREGAZE_VERSION_PATCH}
     COREGAZE_VERSION_BUILD=${COREGAZE_VERSION_BUILD}
+    $<$<COMPILE_LANGUAGE:CXX>:COREGAZE_VERSION_TEXT="${COREGAZE_VERSION}">
 )
 
 # Include directories

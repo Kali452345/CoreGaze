@@ -27,15 +27,22 @@ Passing `-1` to `DwmExtendFrameIntoClientArea` removes the opaque backing of the
 ## DPI Awareness
 The process opts into per-monitor v2 DPI awareness before creating the window, so the overlay renders at native resolution and all coordinates are physical pixels. See `dpi_scaling.md`.
 
+## HUD-Sized Host Window
+The host window is exactly as large as the HUD, not a full-screen canvas, so the swap chain, clear and present, and DWM composition only cover the HUD's pixels.
+
+- The window starts at a rough size estimate. After every `ImGui::Render()`, the HUD's measured size (`ImGui::GetWindowSize()`) is compared with the client rect; on a mismatch the window is resized and the swap chain is resized in the same frame, before drawing, so a new size never shows stretched.
+- ImGui clamps auto-resizing windows to the display size, so `io.DisplaySize` is overridden with the work-area size each frame; otherwise the HUD could never grow past the current window.
+- The ImGui window is pinned at `(0, 0)` with `NoMove`. ALT + drag moves the Win32 window instead, using screen-space cursor positions (`GetCursorPos`), because ImGui's client-space mouse delta cancels out when the window moves under the cursor.
+
 ## Work-Area Boundaries
-CoreGaze constrains the overlay host window to desktop work-area bounds instead of full virtual-screen bounds:
+`ApplyOverlayBounds()` places the window at the saved position (or the default top-right spot) and clamps it so it stays fully inside the primary work area:
 
 - Primary path: `SystemParametersInfoW(SPI_GETWORKAREA, ...)`.
 - Fallback path: `SM_XVIRTUALSCREEN`, `SM_YVIRTUALSCREEN`, `SM_CXVIRTUALSCREEN`, and `SM_CYVIRTUALSCREEN` when work-area query fails.
 
 This keeps the overlay from covering the taskbar while preserving safe fallback behavior on unusual shell states.
 
-The bounds are reapplied on `WM_SETTINGCHANGE` and `WM_DISPLAYCHANGE`, so taskbar and display layout changes are reflected at runtime.
+It runs at startup, while dragging, after the HUD resizes (a taller HUD near the bottom edge is pushed back up), on `Reset Overlay Position`, and on `WM_SETTINGCHANGE`, `WM_DISPLAYCHANGE` and `WM_DPICHANGED`. The clamp does not overwrite the saved position, so a HUD pushed in by a temporary resolution change returns once the space is back. Each call also re-asserts `HWND_TOPMOST`.
 
 ## Single-Instance Guard
 CoreGaze enforces single-instance behavior at process startup with a named mutex (`Local\\CoreGaze.SingleInstance`).

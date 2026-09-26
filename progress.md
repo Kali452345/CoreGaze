@@ -625,3 +625,20 @@
 
 **Immediate Next Steps:**
 - HUD-sized host window.
+
+## 2026-09-26: HUD-Sized Host Window
+
+**Summary of Work Done:**
+- The DX11 host window used to cover the whole primary work area, so every frame cleared, presented and DWM-composited a full-screen transparent surface to show a HUD a few hundred pixels wide. The window is now exactly the HUD's size (386x420 here instead of 1920x1020).
+- After each `ImGui::Render()` the HUD's measured size is compared with the client rect; on a change the window and the swap chain are resized in the same frame, before drawing.
+- `io.DisplaySize` is overridden with the work-area size so ImGui's auto-fit clamp doesn't stop the HUD from growing.
+- ALT + drag now moves the Win32 window (screen-space cursor tracking). The ImGui window is pinned at `(0, 0)`.
+- `ApplyOverlayBounds()` now places and clamps the HUD window inside the work area (startup, drag, resize, reset, display/DPI/setting changes) instead of stretching the window over it. `g_resetPositionRequested` is gone; the tray command applies the reset directly.
+- Saved positions are now screen coordinates. The schema 2 migration (unreleased, from the DPI change) also adds the work-area origin, which only differs when the taskbar is on the top or left.
+
+**Current State:**
+- Verified: the window is 386x420 at the saved position and renders fully, with transparent rounded corners. A saved position of `5000,5000` is clamped flush to the work area's bottom-right corner (above the taskbar) and left unchanged in the config.
+- Not yet verified by hand: ALT + drag feel, and live resizing when a row is toggled from the tray (the same code path handles the startup resize, which works).
+
+**Immediate Next Steps:**
+- Rebuild `build\`, relaunch, and spot-check ALT + drag and toggling rows.

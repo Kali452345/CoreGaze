@@ -10,6 +10,7 @@
 #include <dbt.h>
 #include <wtsapi32.h>
 #include <stdio.h>
+#include <math.h>
 #include <wchar.h>
 #include "SystemMonitor.h"
 
@@ -46,7 +47,7 @@ static const wchar_t* kStartupRegistryValueName = L"CoreGaze";
 #define COREGAZE_VERSION_TEXT "0.0.0-dev"
 #endif
 static const wchar_t* kCurrentAppVersion = L"" COREGAZE_VERSION_TEXT;
-// Schema 2: [Window] PosX/PosY are physical pixels (the process became per-monitor DPI aware).
+// Schema 2: [Window] PosX/PosY are the HUD window's screen position in physical pixels.
 static const DWORD kConfigSchemaVersion = 2;
 // HUD layout at 100% scaling (96 DPI); multiplied by g_dpiScale when rendering.
 static const float kHudFontSize = 17.0f;
@@ -141,7 +142,6 @@ static wchar_t g_configPath[MAX_PATH] = {};
 static wchar_t g_diagnosticsPath[MAX_PATH] = {};
 static SystemMonitor* g_systemMonitor = nullptr;
 static HANDLE g_singleInstanceMutex = NULL;
-static bool g_resetPositionRequested = false;
 // The HUD always lives on the primary monitor's work area, so one scale factor covers it.
 static float g_dpiScale = 1.0f;
 static bool g_dpiScaleChanged = false;
@@ -181,7 +181,7 @@ void DiscoverHardwareForMenu();
 void ShowTrayContextMenu(HWND hwnd);
 void HandleTrayCommand(HWND hwnd, UINT commandId);
 static RECT GetOverlayWorkAreaBounds();
-static void ApplyOverlayBounds(HWND hwnd);
+static POINT ApplyOverlayBounds(HWND hwnd);
 static float GetPrimaryMonitorDpiScale();
 static void ApplyHudStyle(float scale);
 static HICON LoadAppIcon(HINSTANCE hInstance, int width, int height);
@@ -245,19 +245,18 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, appIconLarge, nullptr, nullptr, nullptr, kWindowClassName, appIconSmall };
     ::RegisterClassExW(&wc);
 
-    const RECT overlayBounds = GetOverlayWorkAreaBounds();
-    const int overlayWidth = overlayBounds.right - overlayBounds.left;
-    const int overlayHeight = overlayBounds.bottom - overlayBounds.top;
-    
+    // The host window is only as large as the HUD: it starts at a rough estimate, the first frame
+    // resizes it to the HUD's measured size, and ApplyOverlayBounds places it.
     HWND hwnd = ::CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
-        wc.lpszClassName, 
+        wc.lpszClassName,
         kWindowTitle,
         WS_POPUP, // Borderless
-        overlayBounds.left, overlayBounds.top,
-        overlayWidth, overlayHeight,
+        0, 0,
+        (int)((kHudBarWidth + 20.0f) * g_dpiScale), (int)(100.0f * g_dpiScale),
         nullptr, nullptr, wc.hInstance, nullptr);
-        
+    ApplyOverlayBounds(hwnd);
+
     SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
 
     MARGINS margins = { -1 };
@@ -319,6 +318,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         kOverlayHotkeyModifiers,
         kOverlayHotkeyVirtualKey);
 
+    bool hudDragging = false;
+    POINT hudDragOffset = {};
+
     // Main loop
     bool done = false;
     while (!done)
@@ -375,15 +377,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             }
         }
 
-        // Handle window resize (we don't resize directly, but just in case)
-        if (g_ResizeWidth != 0 && g_ResizeHeight != 0)
-        {
-            CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
-            g_ResizeWidth = g_ResizeHeight = 0;
-            CreateRenderTarget();
-        }
-
         // Update hardware metrics (internally throttled to polling interval)
         sysMonitor.Update();
 
@@ -400,48 +393,48 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         // Start the Dear ImGui frame
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        // The host window is HUD-sized, but ImGui clamps auto-fit windows to the display size, so
+        // report the work area instead; otherwise the HUD could never grow past its current size.
+        const RECT workAreaBounds = GetOverlayWorkAreaBounds();
+        io.DisplaySize = ImVec2((float)(workAreaBounds.right - workAreaBounds.left), (float)(workAreaBounds.bottom - workAreaBounds.top));
         ImGui::NewFrame();
 
-        // Minimalist HUD Configuration - Saved position or default top right
-        if (g_resetPositionRequested) {
-            const RECT workAreaBounds = GetOverlayWorkAreaBounds();
-            g_appSettings.overlayPosX = (float)workAreaBounds.right - kHudDefaultRightOffset * g_dpiScale;
-            g_appSettings.overlayPosY = (float)workAreaBounds.top + kHudDefaultTopOffset * g_dpiScale;
-            g_appSettings.hasSavedPos = FALSE;
-            ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_Always);
-            g_resetPositionRequested = false;
-        } else if (g_appSettings.hasSavedPos) {
-            ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_FirstUseEver);
-        } else {
-            const RECT workAreaBounds = GetOverlayWorkAreaBounds();
-            ImGui::SetNextWindowPos(ImVec2((float)workAreaBounds.right - kHudDefaultRightOffset * g_dpiScale, (float)workAreaBounds.top + kHudDefaultTopOffset * g_dpiScale), ImGuiCond_FirstUseEver);
-        }
-
+        // The HUD fills the host window; the Win32 window itself is what moves.
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0)); // No border outline
         ImGui::Begin(kHudWindowTitle, nullptr,
-            ImGuiWindowFlags_NoDecoration | 
-            ImGuiWindowFlags_AlwaysAutoResize | 
-            ImGuiWindowFlags_NoSavedSettings | 
-            ImGuiWindowFlags_NoFocusOnAppearing | 
+            ImGuiWindowFlags_NoDecoration |
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoFocusOnAppearing |
             ImGuiWindowFlags_NoNav |
-            (isAltHeld ? 0 : ImGuiWindowFlags_NoMove));
+            ImGuiWindowFlags_NoMove);
 
-        if (isAltHeld) {
-            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                ImVec2 mouseDelta = io.MouseDelta;
-                if (mouseDelta.x != 0.0f || mouseDelta.y != 0.0f) {
-                    g_appSettings.overlayPosX += mouseDelta.x;
-                    g_appSettings.overlayPosY += mouseDelta.y;
-                    g_appSettings.hasSavedPos = TRUE;
-                    ImGui::SetNextWindowPos(ImVec2(g_appSettings.overlayPosX, g_appSettings.overlayPosY), ImGuiCond_Always);
-                }
+        // ALT + drag moves the host window. Screen-space cursor positions are used because the
+        // window moves under the cursor, which makes ImGui's client-space mouse delta cancel out.
+        if (isAltHeld && !hudDragging &&
+            ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            POINT cursor;
+            RECT windowRect;
+            if (GetCursorPos(&cursor) && GetWindowRect(hwnd, &windowRect)) {
+                hudDragOffset.x = cursor.x - windowRect.left;
+                hudDragOffset.y = cursor.y - windowRect.top;
+                hudDragging = true;
+            }
+        }
+        if (hudDragging) {
+            POINT cursor;
+            if (!isAltHeld || !ImGui::IsMouseDown(ImGuiMouseButton_Left) || !GetCursorPos(&cursor)) {
+                hudDragging = false;
             } else {
-                ImVec2 curPos = ImGui::GetWindowPos();
-                if (curPos.x != g_appSettings.overlayPosX || curPos.y != g_appSettings.overlayPosY) {
-                    g_appSettings.overlayPosX = curPos.x;
-                    g_appSettings.overlayPosY = curPos.y;
-                    g_appSettings.hasSavedPos = TRUE;
-                }
+                g_appSettings.overlayPosX = (float)(cursor.x - hudDragOffset.x);
+                g_appSettings.overlayPosY = (float)(cursor.y - hudDragOffset.y);
+                g_appSettings.hasSavedPos = TRUE;
+                // Store the clamped position so what is saved is where the HUD actually is.
+                const POINT placed = ApplyOverlayBounds(hwnd);
+                g_appSettings.overlayPosX = (float)placed.x;
+                g_appSettings.overlayPosY = (float)placed.y;
             }
         }
 
@@ -709,10 +702,29 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), " *(Hold ALT to move)* ");
 
+        const ImVec2 hudSize = ImGui::GetWindowSize();
         ImGui::End();
         ImGui::PopStyleColor(); // Pop border color
 
         ImGui::Render();
+
+        // Fit the host window to the HUD (rows toggled, names changed, DPI changed). WM_SIZE queues
+        // the swap-chain resize, which is applied right below so the new size never shows stretched.
+        const int hudWidth = (int)ceilf(hudSize.x);
+        const int hudHeight = (int)ceilf(hudSize.y);
+        RECT clientRect;
+        if (hudWidth > 0 && hudHeight > 0 && GetClientRect(hwnd, &clientRect) &&
+            (clientRect.right != hudWidth || clientRect.bottom != hudHeight)) {
+            SetWindowPos(hwnd, NULL, 0, 0, hudWidth, hudHeight, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            ApplyOverlayBounds(hwnd); // A taller HUD near the bottom edge is pushed back inside the work area.
+        }
+        if (g_ResizeWidth != 0 && g_ResizeHeight != 0)
+        {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+            g_ResizeWidth = g_ResizeHeight = 0;
+            CreateRenderTarget();
+        }
         // Fully transparent clear color
         const float clear_color_with_alpha[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
@@ -977,19 +989,35 @@ static RECT GetOverlayWorkAreaBounds() {
     return bounds;
 }
 
-static void ApplyOverlayBounds(HWND hwnd) {
-    if (hwnd == NULL) {
-        return;
-    }
-
+// Places the HUD-sized host window at the saved position (or the default top-right spot), clamped
+// so it stays fully inside the primary work area. The saved position itself is left alone, so a
+// HUD pushed in by a temporary resolution change returns once the space is back. Returns where
+// the window was placed.
+static POINT ApplyOverlayBounds(HWND hwnd) {
     const RECT bounds = GetOverlayWorkAreaBounds();
-    const int width = bounds.right - bounds.left;
-    const int height = bounds.bottom - bounds.top;
-    if (width <= 0 || height <= 0) {
-        return;
+    POINT target;
+    if (g_appSettings.hasSavedPos) {
+        target.x = (LONG)g_appSettings.overlayPosX;
+        target.y = (LONG)g_appSettings.overlayPosY;
+    } else {
+        target.x = bounds.right - (LONG)(kHudDefaultRightOffset * g_dpiScale);
+        target.y = bounds.top + (LONG)(kHudDefaultTopOffset * g_dpiScale);
     }
 
-    SetWindowPos(hwnd, HWND_TOPMOST, bounds.left, bounds.top, width, height, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    RECT windowRect;
+    if (hwnd == NULL || !GetWindowRect(hwnd, &windowRect)) {
+        return target;
+    }
+    const LONG width = windowRect.right - windowRect.left;
+    const LONG height = windowRect.bottom - windowRect.top;
+    if (target.x > bounds.right - width) target.x = bounds.right - width;
+    if (target.y > bounds.bottom - height) target.y = bounds.bottom - height;
+    if (target.x < bounds.left) target.x = bounds.left;
+    if (target.y < bounds.top) target.y = bounds.top;
+
+    // HWND_TOPMOST re-asserts the z-order, which other topmost windows may have taken.
+    SetWindowPos(hwnd, HWND_TOPMOST, target.x, target.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    return target;
 }
 
 static float GetPrimaryMonitorDpiScale() {
@@ -1317,12 +1345,14 @@ void LoadAppSettings() {
     GetPrivateProfileStringW(L"Window", L"PosY", L"0", posYBuf, 32, g_configPath);
     g_appSettings.overlayPosX = (float)_wtof(posXBuf);
     g_appSettings.overlayPosY = (float)_wtof(posYBuf);
-    // Before schema 2 the process was DPI unaware and saw primary-monitor coordinates divided by
-    // the display scale; convert them to the physical pixels a DPI-aware process uses.
+    // Before schema 2 the position was relative to a work-area-sized host window, and the process
+    // was DPI unaware so it saw coordinates divided by the display scale. Schema 2 stores the
+    // HUD-sized window's screen position in physical pixels.
     const UINT savedSchemaVersion = GetPrivateProfileIntW(L"Version", L"ConfigSchemaVersion", 0, g_configPath);
     if (g_appSettings.hasSavedPos && savedSchemaVersion < 2) {
-        g_appSettings.overlayPosX *= g_dpiScale;
-        g_appSettings.overlayPosY *= g_dpiScale;
+        const RECT workArea = GetOverlayWorkAreaBounds();
+        g_appSettings.overlayPosX = g_appSettings.overlayPosX * g_dpiScale + (float)workArea.left;
+        g_appSettings.overlayPosY = g_appSettings.overlayPosY * g_dpiScale + (float)workArea.top;
         // Persist now, since the schema version below is bumped immediately.
         wchar_t buf[32];
         swprintf_s(buf, L"%.1f", g_appSettings.overlayPosX);
@@ -1480,7 +1510,8 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
         g_appSettings.overlayVisible = g_appSettings.overlayVisible ? FALSE : TRUE;
         break;
     case ID_TRAY_RESET_POSITION:
-        g_resetPositionRequested = true;
+        g_appSettings.hasSavedPos = FALSE;
+        ApplyOverlayBounds(hwnd);
         break;
     case ID_TRAY_SHOW_CPU:
         g_appSettings.visibleMetricsMask ^= SYSTEM_METRIC_CPU;

@@ -1,6 +1,6 @@
 # Process Monitor (Per-Process Collector)
 
-`ProcessMonitor` (`ProcessMonitor.h` / `ProcessMonitor.cpp`) collects the data for the planned process window. For every process it gathers CPU, memory, I/O, GPU, threads and handles, without opening a handle to any of them. It is the collector only; the table UI is a separate step.
+`ProcessMonitor` (`ProcessMonitor.h` / `ProcessMonitor.cpp`) collects the data for the process window (`docs/process_window.md`). For every process it gathers CPU, memory, I/O, GPU, threads and handles, without opening a handle to any of them. It is the collector only; the table UI is `ProcessWindow`.
 
 ## Data Source
 Each sample makes one `NtQuerySystemInformation(SystemProcessInformation)` call, resolved from `ntdll.dll` at runtime. The call returns every process, including protected ones, and needs no admin rights. `winternl.h` only exposes part of the `SYSTEM_PROCESS_INFORMATION` layout, so the full layout is declared locally.
@@ -19,7 +19,8 @@ Rejected alternatives, measured on the development machine (8 logical processors
 | `cpuPercent` | Δ(user + kernel time) / (Δelapsed × logical processors) | The same formula as Task Manager since KB5064081 |
 | `privateWorkingSet` | `WorkingSetPrivateSize` | Task Manager's "Memory" column |
 | `workingSet`, `commitBytes` | `WorkingSetSize`, `PrivatePageCount` | Details-page columns |
-| `ioBytesPerSec` | Δ(read + write transfer bytes) / Δelapsed | **All** I/O (files, pipes, devices, network), not disk only. True per-process disk and network figures need an elevated ETW session (planned, opt-in). |
+| `ioBytesPerSec` | Δ(read + write transfer bytes) / Δelapsed | **All** I/O (files, pipes, devices, network), not disk only. True per-process disk and network figures need an elevated ETW session (`docs/etw_disk_network.md`). |
+| `diskRead/WriteBytesPerSec`, `networkSend/ReceiveBytesPerSec` | `EtwMonitor`, merged by `ApplyIoUsage()` | Zero unless CoreGaze runs elevated. `ProcessTotals` gets `diskBytesPerSec` and `networkBytesPerSec`. |
 | `gpuPercent`, `gpuAdapterIndex`, `gpuEngineType` | `SystemMonitor` per-process GPU tracking | The process's busiest engine, as Task Manager shows it |
 | `threadCount`, `handleCount`, `parentPid`, `sessionId`, `createTime` | snapshot | |
 
@@ -43,7 +44,7 @@ Interrupt and DPC time is charged to no process, so the sum of all process times
 - The snapshot buffer starts at 1 MB. On `STATUS_INFO_LENGTH_MISMATCH` it grows to the required size plus 128 KB of headroom. It never shrinks while the monitor is in use.
 - Rows are double-buffered: the current and previous arrays swap each sample. Once the capacity covers the process count (plus 64 rows of slack), a sample allocates nothing.
 - The pid index uses open addressing over a power-of-two table that is at most half full. It is built once per sample for the current rows, and the next sample reuses it as the previous-row index.
-- `Release()` frees everything. The process window will call it on close, so an idle CoreGaze holds none of this memory.
+- `Release()` frees everything. The process window calls it on close, so an idle CoreGaze holds none of this memory.
 
 ## Measured Cost
 Measured on the development machine at 20-50% load, with Task Manager and browsers running:

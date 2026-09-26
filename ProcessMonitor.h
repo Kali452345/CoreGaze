@@ -2,6 +2,7 @@
 #include <windows.h>
 
 struct ProcessGpuUsage;
+struct ProcessIoUsage;
 
 // One process as shown in the process window. Rates cover the interval between the last two samples.
 struct ProcessRow {
@@ -15,6 +16,10 @@ struct ProcessRow {
     ULONGLONG workingSet;        // bytes
     ULONGLONG commitBytes;       // private bytes (commit charge)
     float ioBytesPerSec;         // read + write: all I/O (files, pipes, devices, network), not only disk
+    float diskReadBytesPerSec;   // disk and network come from EtwMonitor (administrator only)
+    float diskWriteBytesPerSec;
+    float networkSendBytesPerSec;
+    float networkReceiveBytesPerSec;
     float gpuPercent;
     BYTE gpuAdapterIndex;
     BYTE gpuEngineType;          // SystemMonitor::GetGpuEngineLabel
@@ -27,6 +32,8 @@ struct ProcessRow {
 struct ProcessTotals {
     float cpuPercent;            // 100 - System Idle Process share of elapsed time x logical processors
     float ioBytesPerSec;
+    float diskBytesPerSec;
+    float networkBytesPerSec;
     ULONGLONG privateWorkingSet;
     UINT processCount;
     UINT threadCount;
@@ -46,6 +53,8 @@ public:
     bool Sample();
     // Merges SystemMonitor's per-process GPU load (sorted by pid) into the current rows.
     void ApplyGpuUsage(const ProcessGpuUsage* entries, UINT count);
+    // Merges EtwMonitor's per-process disk and network rates into the current rows and totals.
+    void ApplyIoUsage(const ProcessIoUsage* entries, UINT count);
     void Release();
 
     UINT GetRowCount() const { return m_rowCount; }

@@ -1,5 +1,6 @@
 #include "ProcessMonitor.h"
 #include "SystemMonitor.h"
+#include "EtwMonitor.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -343,6 +344,10 @@ bool ProcessMonitor::Sample() {
             row->ioBytes = (ULONGLONG)info->ReadTransferCount.QuadPart + (ULONGLONG)info->WriteTransferCount.QuadPart;
             row->cpuPercent = 0.0f;
             row->ioBytesPerSec = 0.0f;
+            row->diskReadBytesPerSec = 0.0f;
+            row->diskWriteBytesPerSec = 0.0f;
+            row->networkSendBytesPerSec = 0.0f;
+            row->networkReceiveBytesPerSec = 0.0f;
             row->gpuPercent = 0.0f;
             row->gpuAdapterIndex = 0;
             row->gpuEngineType = 0;
@@ -423,5 +428,29 @@ void ProcessMonitor::ApplyGpuUsage(const ProcessGpuUsage* entries, UINT count) {
         row->gpuPercent = entries[i].percent;
         row->gpuAdapterIndex = entries[i].adapterIndex;
         row->gpuEngineType = entries[i].engineType;
+    }
+}
+
+void ProcessMonitor::ApplyIoUsage(const ProcessIoUsage* entries, UINT count) {
+    m_totals.diskBytesPerSec = 0.0f;
+    m_totals.networkBytesPerSec = 0.0f;
+    if (entries == NULL) {
+        return;
+    }
+    for (UINT i = 0; i < count; ++i) {
+        const ProcessIoUsage& usage = entries[i];
+        // Totals include traffic of processes that exited during the interval.
+        m_totals.diskBytesPerSec += usage.diskReadBytesPerSec + usage.diskWriteBytesPerSec;
+        m_totals.networkBytesPerSec += usage.networkSendBytesPerSec + usage.networkReceiveBytesPerSec;
+
+        const int rowIndex = FindRowIndex(usage.pid);
+        if (rowIndex < 0) {
+            continue;
+        }
+        ProcessRow* row = &m_rows[rowIndex];
+        row->diskReadBytesPerSec = usage.diskReadBytesPerSec;
+        row->diskWriteBytesPerSec = usage.diskWriteBytesPerSec;
+        row->networkSendBytesPerSec = usage.networkSendBytesPerSec;
+        row->networkReceiveBytesPerSec = usage.networkReceiveBytesPerSec;
     }
 }

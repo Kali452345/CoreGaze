@@ -686,3 +686,19 @@
   - A Dear ImGui table with sortable columns and a name/PID filter.
   - Redraws only on data ticks or input.
   - Opens from the tray and a hotkey; calls `Release()` on close.
+
+## 2026-09-26: Process Manager - ETW Disk and Network Collector
+
+**Summary of Work Done:**
+- New `EtwMonitor` (`EtwMonitor.h/.cpp`, added to CMake). It feeds per-process disk and network rates from a private kernel ETW system-logger session (`DISK_IO` + `NETWORK_TCPIP`, `NO_SYSCONFIG`):
+  - Disk events are attributed through `IssuingThreadId`, using a thread-to-process cache.
+  - TCP and UDP events carry the PID in their payload.
+  - Byte counts go into a locked PID table; `Drain()` turns them into bytes per second.
+- `ProcessMonitor` rows gained disk read/write and network send/receive fields; totals gained disk and network. `ApplyIoUsage()` merges the ETW data.
+- New doc `docs/etw_disk_network.md`; `docs/process_monitor.md` updated.
+
+**Current State:**
+- Compiles. Starting the session needs administrator rights, so it is started only by an elevated process window (next entry). The elevated path is untested: it needs an admin session with the user present.
+
+**Immediate Next Steps:**
+- The process window UI, and the elevation paths that turn this on.

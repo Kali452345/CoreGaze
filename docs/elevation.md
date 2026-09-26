@@ -8,9 +8,9 @@ There are two ways to get it.
 
 ## Restart as Administrator (One-Off)
 Available from the tray menu (**Restart as Administrator**, shown only when not elevated) and from the process window's toolbar button:
-1. `RelaunchElevated` starts `CoreGaze.exe --wait-for-pid <current pid> [--open-processes]` with the `runas` verb, which shows a UAC prompt.
+1. `RelaunchElevated` starts `CoreGaze.exe --wait-for-pid <current pid> [--background]` with the `runas` verb, which shows a UAC prompt.
 2. If the user accepts, the current instance closes (`DestroyWindow`) and the new one waits up to 10 s for it to exit (`WaitForPreviousInstanceFromCommandLine`) before taking the single-instance mutex.
-3. `--open-processes` reopens the process window if it was open.
+3. The elevated copy opens the process window, as any start does. `--background` is added when the window was closed, so it stays closed.
 
 Declining the prompt (`ERROR_CANCELLED`) changes nothing. Other failures show a message box with the error code.
 
@@ -34,6 +34,8 @@ At startup (`WinMain`), when `[General] AlwaysElevated=1` and CoreGaze is not el
 
 This covers every launch path: the **Launch on Windows Startup** Run key, Start menu and desktop shortcuts, and the installer's "Launch CoreGaze".
 
+`schtasks /Run` can't pass arguments to the task. So before starting it, the handing-over instance records in `[General] HandoffBackground` whether it was started with `--background`. The task instance reads that value and clears it, so a sign-in start stays in the background and a Start menu start opens the process window. "Restart it as administrator now?" (below) sets the value from whether the window is open.
+
 - `--no-elevate` skips the handoff (for troubleshooting).
 - A `--from-task` instance never hands off again. For an account that isn't an administrator, `HighestAvailable` yields a normal token, and without this rule the two would loop.
 
@@ -56,13 +58,14 @@ The installer's `CurUninstallStepChanged` checks for the task with `schtasks /Qu
 |---|---|
 | `[General] AlwaysElevated` | 1 = hand non-elevated starts over to the elevated task |
 | `[General] AlwaysElevatedPath` | Executable path the task was registered with |
+| `[General] HandoffBackground` | Set only between a handoff and the task instance's start: 1 = the original start was `--background` |
 
 ## Command-Line Flags
 | Flag | Meaning |
 |---|---|
 | `--wait-for-pid <pid>` | Wait (up to 10 s) for that process to exit before starting |
 | `--from-task` | Started by the elevated task: retry the single-instance mutex for 5 s; never hand off |
-| `--open-processes` | Open the process window at startup |
+| `--background` | Start without opening the process window (the Run key uses it) |
 | `--no-elevate` | Don't hand off to the elevated task this time |
 
 ## Testing Status

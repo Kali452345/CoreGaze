@@ -330,6 +330,22 @@ private:
     BYTE* m_pdhThermalBuffer;
     DWORD m_pdhThermalBufferSize;
 
+    // Disk temperatures are read on a thread-pool thread. Some drives (USB bridges, some
+    // controllers) take seconds to reject the query, which would freeze the UI thread. The UI
+    // thread fills the job, submits it, and applies the results once the worker clears `busy`.
+    struct DiskTemperatureJob {
+        UINT diskCount;
+        int physicalDiskIndex[kMaxDriveLetters];
+        bool ok[kMaxDriveLetters];
+        float temperatureC[kMaxDriveLetters];
+        float warningC[kMaxDriveLetters];
+        float criticalC[kMaxDriveLetters];
+    };
+    PTP_WORK m_diskTemperatureWork;
+    DiskTemperatureJob m_diskTemperatureJob;
+    std::atomic<bool> m_diskTemperatureJobBusy;
+    bool m_diskTemperatureResultsPending;   // a submitted job's results are not applied yet
+
     void PollMetrics();
     void InitializeGpuMonitoring(ID3D11Device* d3dDevice);
     void PollGpuMetrics();
@@ -340,6 +356,8 @@ private:
     void PollCpuTemperature();
     void PollGpuTemperatures();
     void PollDiskTemperatures();
+    void ApplyDiskTemperatureResults();
+    static void CALLBACK DiskTemperatureWorkCallback(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_WORK work);
     void CloseGpuKmtHandles();
     void ClearGpuTemperatures();
     void ClearDiskTemperatures();

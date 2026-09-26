@@ -321,8 +321,12 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_pdhThermalCounter(NULL),
       m_pdhThermalHighPrecision(false),
       m_pdhThermalBuffer(NULL),
-      m_pdhThermalBufferSize(0)
+      m_pdhThermalBufferSize(0),
+      m_diskTemperatureWork(NULL),
+      m_diskTemperatureJobBusy(false),
+      m_diskTemperatureResultsPending(false)
 {
+    ZeroMemory(&m_diskTemperatureJob, sizeof(m_diskTemperatureJob));
     m_cpuName[0] = '\0';
     QueryCpuName(m_cpuName, sizeof(m_cpuName));
     m_ramSpeedMHz = QueryRamSpeedMHz();
@@ -435,6 +439,13 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
 
 SystemMonitor::~SystemMonitor() {
     ShutdownNetworkNotifications();
+
+    if (m_diskTemperatureWork != NULL) {
+        // A running query can't be interrupted; exit waits for it (at most a slow drive's timeout).
+        WaitForThreadpoolWorkCallbacks(m_diskTemperatureWork, TRUE);
+        CloseThreadpoolWork(m_diskTemperatureWork);
+        m_diskTemperatureWork = NULL;
+    }
 
     ClearDiskCounterHandles();
 
@@ -996,6 +1007,7 @@ void SystemMonitor::PollMetrics() {
     }
 
     if (pollDisk && m_temperaturesEnabled) {
+        ApplyDiskTemperatureResults(); // from the previous query, once the worker has finished
         if (IsIntervalDue(m_lastDiskTemperaturePoll, temperatureNow, kDiskTemperaturePollMs)) {
             PollDiskTemperatures();
             m_lastDiskTemperaturePoll = temperatureNow;
@@ -2457,39 +2469,88 @@ void SystemMonitor::PollGpuTemperatures() {
     SyncLegacyGpuFields();
 }
 
+// Starts a background read of the selected drives' temperatures. The results are applied by
+// ApplyDiskTemperatureResults on a later poll, so a slow drive never blocks the UI thread.
 void SystemMonitor::PollDiskTemperatures() {
+    if (m_diskTemperatureJobBusy.load(std::memory_order_acquire)) {
+        return; // the previous query is still running
+    }
+    ApplyDiskTemperatureResults();
+
+    DiskTemperatureJob* job = &m_diskTemperatureJob;
+    job->diskCount = 0;
+    for (UINT i = 0; i < kMaxDriveLetters; ++i) {
+        const DriveCounterSlot* slot = &m_driveCounters[i];
+        if (!slot->selected || !slot->temperatureSupported) {
+            continue;
+        }
+        // Several volumes on one disk share a single reading.
+        bool listed = false;
+        for (UINT j = 0; j < job->diskCount; ++j) {
+            listed = listed || job->physicalDiskIndex[j] == slot->physicalDiskIndex;
+        }
+        if (!listed) {
+            job->physicalDiskIndex[job->diskCount] = slot->physicalDiskIndex;
+            job->ok[job->diskCount] = false;
+            ++job->diskCount;
+        }
+    }
+    if (job->diskCount == 0) {
+        return;
+    }
+
+    if (m_diskTemperatureWork == NULL) {
+        m_diskTemperatureWork = CreateThreadpoolWork(DiskTemperatureWorkCallback, this, NULL);
+        if (m_diskTemperatureWork == NULL) {
+            return;
+        }
+    }
+    m_diskTemperatureResultsPending = true;
+    m_diskTemperatureJobBusy.store(true, std::memory_order_release);
+    SubmitThreadpoolWork(m_diskTemperatureWork);
+}
+
+void CALLBACK SystemMonitor::DiskTemperatureWorkCallback(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_WORK work) {
+    (void)instance;
+    (void)work;
+    SystemMonitor* self = (SystemMonitor*)context;
+    DiskTemperatureJob* job = &self->m_diskTemperatureJob;
+    for (UINT i = 0; i < job->diskCount; ++i) {
+        job->ok[i] = QueryStorageTemperature(job->physicalDiskIndex[i], &job->temperatureC[i],
+                                             &job->warningC[i], &job->criticalC[i]);
+    }
+    self->m_diskTemperatureJobBusy.store(false, std::memory_order_release);
+}
+
+void SystemMonitor::ApplyDiskTemperatureResults() {
+    if (!m_diskTemperatureResultsPending || m_diskTemperatureJobBusy.load(std::memory_order_acquire)) {
+        return;
+    }
+    m_diskTemperatureResultsPending = false;
+
+    const DiskTemperatureJob* job = &m_diskTemperatureJob;
     for (UINT i = 0; i < kMaxDriveLetters; ++i) {
         DriveCounterSlot* slot = &m_driveCounters[i];
         if (!slot->selected || !slot->temperatureSupported) {
             slot->temperatureAvailable = false;
             continue;
         }
-
-        // Several volumes on one disk share a single reading.
-        bool copied = false;
-        for (UINT j = 0; j < i; ++j) {
-            const DriveCounterSlot* earlier = &m_driveCounters[j];
-            if (earlier->selected && earlier->temperatureSupported && earlier->physicalDiskIndex == slot->physicalDiskIndex) {
-                slot->temperatureAvailable = earlier->temperatureAvailable;
-                slot->temperatureC = earlier->temperatureC;
-                slot->temperatureWarningC = earlier->temperatureWarningC;
-                slot->temperatureCriticalC = earlier->temperatureCriticalC;
-                copied = true;
+        int entry = -1;
+        for (UINT j = 0; j < job->diskCount; ++j) {
+            if (job->physicalDiskIndex[j] == slot->physicalDiskIndex) {
+                entry = (int)j;
                 break;
             }
         }
-        if (copied) {
-            continue;
+        if (entry < 0) {
+            continue; // selected after the job started; the next query covers it
         }
 
-        float temperatureC = 0.0f;
-        float warningC = 0.0f;
-        float criticalC = 0.0f;
-        if (QueryStorageTemperature(slot->physicalDiskIndex, &temperatureC, &warningC, &criticalC)) {
+        if (job->ok[entry]) {
             slot->temperatureAvailable = true;
-            slot->temperatureC = temperatureC;
-            slot->temperatureWarningC = warningC > 0.0f ? warningC : kDefaultDiskTemperatureWarningC;
-            slot->temperatureCriticalC = criticalC > 0.0f ? criticalC : kDefaultDiskTemperatureCriticalC;
+            slot->temperatureC = job->temperatureC[entry];
+            slot->temperatureWarningC = job->warningC[entry] > 0.0f ? job->warningC[entry] : kDefaultDiskTemperatureWarningC;
+            slot->temperatureCriticalC = job->criticalC[entry] > 0.0f ? job->criticalC[entry] : kDefaultDiskTemperatureCriticalC;
             if (slot->temperatureCriticalC < slot->temperatureWarningC) {
                 slot->temperatureCriticalC = slot->temperatureWarningC;
             }

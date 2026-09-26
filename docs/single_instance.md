@@ -5,6 +5,10 @@ CoreGaze now enforces a single running instance through a named Win32 mutex.
 ## How It Works
 - On startup, `WinMain` calls `AcquireSingleInstanceMutex`, which calls `CreateMutexW` with `Local\\CoreGaze.SingleInstance`.
 - If `GetLastError()` returns `ERROR_ALREADY_EXISTS`, the new process exits immediately.
+- Unless it was started with `--background` or `--from-task`, it first asks the running instance to show its process window (`ActivateRunningInstance`):
+  - It finds the HUD window (`CoreGazeClass`) and grants that process the right to take the foreground (`AllowSetForegroundWindow`). The new process may do so because the user just started it.
+  - It then posts `WM_COREGAZE_OPEN_PROCESSES` (`WM_APP + 111`).
+  - An elevated instance lets that message through UIPI with `ChangeWindowMessageFilterEx`, so a normal start can still bring it up.
 
 ## Handovers
 Two startup paths hand over from one instance to another; see `docs/elevation.md`:

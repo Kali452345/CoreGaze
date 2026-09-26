@@ -761,3 +761,27 @@
 **Immediate Next Steps:**
 - Run the admin test pass with the user.
 - Optional: a background cache for friendly names, descriptions and icons (Phase 3).
+
+## 2026-09-26: Process Window as the Main Window, Larger Text
+
+**Summary of Work Done:**
+- Starting CoreGaze now opens the process window together with the overlay.
+- Starting it again while it runs brings up the running instance's process window (`ActivateRunningInstance` posts `WM_COREGAZE_OPEN_PROCESSES`, allowed through UIPI for an elevated instance).
+- Sign-in stays quiet: the Run key (app and installer) is now `"CoreGaze.exe" --background`.
+  - `LoadAppSettings` rewrites the Run value on every start, which upgrades old entries.
+  - The elevated-task handoff carries the background flag through `[General] HandoffBackground`, because `schtasks /Run` can't pass arguments.
+  - "Restart as administrator" adds `--background` when the window was closed. `--open-processes` is gone, since opening is now the default.
+- Process window text: 17 px by default instead of 15.
+  - Adjustable with Ctrl + mouse wheel, Ctrl+plus/minus, Ctrl+0 (reset) or the toolbar's `Text: - +`; saved as `[Processes] FontSize` (12-28).
+  - Spacing and default widths scale with it, and saved column widths are rescaled by ImGui (`RefScale`).
+  - Default window size 1120x680.
+- Process window layout at large text sizes:
+  - The toolbar wraps to a second row when it doesn't fit.
+  - The administrator button/state moved to the right end of the status bar.
+  - The table scrolls sideways instead of squeezing the Name column below 190 px; the Name column stays frozen.
+- Startup: the window used to show "0 processes" for 2.6-4.7 s after launch.
+  - Cause: `PollDiskTemperatures` ran the storage temperature IOCTL on the UI thread. Two drives here take 2.0 s to reject it, and it ran twice at startup: in the constructor, and after the settings-driven disk counter rebuild.
+  - Fix: the reads moved to a thread-pool work item.
+  - Measured: first process sample at 0.65 s after launch. C: still reads 40 C; the drives with no sensor are still marked as such.
+  - This also removes a 2 s HUD freeze after every unlock, resume and display-on, which rebuild the disk counters.
+- Docs: `process_window.md`, `elevation.md`, `single_instance.md`, `startup_management.md`, `system_tray_hub.md`, `installer_upgrade.md`, `temperature_metrics.md`.

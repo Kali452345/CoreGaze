@@ -25,9 +25,14 @@ const wchar_t kWindowTitle[] = L"CoreGaze - Processes";
 const wchar_t kSection[] = L"Processes";
 
 // Layout at 100% scaling (96 DPI); multiplied by the window's DPI scale.
-const float kFontSize = 15.0f;
-const float kDefaultWidth = 1000.0f;
-const float kDefaultHeight = 640.0f;
+// Sizes below are designed for kReferenceFontSize text and grow with the chosen text size.
+const float kReferenceFontSize = 15.0f;
+const float kDefaultFontSize = 17.0f;
+const float kMinFontSize = 12.0f;
+const float kMaxFontSize = 28.0f;
+const float kMinNameWidth = 190.0f;         // below this the table scrolls sideways
+const float kDefaultWidth = 1120.0f;
+const float kDefaultHeight = 680.0f;
 const float kMinWidth = 560.0f;
 const float kMinHeight = 320.0f;
 
@@ -287,6 +292,7 @@ ProcessWindow::ProcessWindow()
     ZeroMemory(&m_settings, sizeof(m_settings));
     m_settings.refreshMs = 1000;
     m_settings.groupByName = TRUE;
+    m_settings.fontSize = kDefaultFontSize;
 }
 
 ProcessWindow::~ProcessWindow() {
@@ -524,7 +530,7 @@ bool ProcessWindow::CreateImGuiContext() {
         ImFontConfig fontConfig;
         fontConfig.OversampleH = 2;
         fontConfig.OversampleV = 1;
-        font = io.Fonts->AddFontFromFileTTF(fontPath, kFontSize, &fontConfig);
+        font = io.Fonts->AddFontFromFileTTF(fontPath, kDefaultFontSize, &fontConfig);
     }
     if (font == NULL) {
         io.Fonts->AddFontDefault();
@@ -555,10 +561,30 @@ void ProcessWindow::ApplyStyle() {
     style.Colors[ImGuiCol_Header] = ImVec4(0.24f, 0.44f, 0.76f, 0.55f);
     style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.30f, 0.50f, 0.82f, 0.35f);
     style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.30f, 0.50f, 0.82f, 0.65f);
-    style.ScaleAllSizes(m_dpiScale);
+    style.ScaleAllSizes(UiScale());
+    // Glyphs are rasterized on demand at FontSizeBase * FontScaleDpi, so a size change needs no
+    // atlas rebuild. Table column widths follow on their own (ImGui rescales them by font size).
+    style.FontSizeBase = m_settings.fontSize;
     style.FontScaleDpi = m_dpiScale;
     ImGui::GetStyle() = style;
     m_styleDirty = false;
+}
+
+float ProcessWindow::UiScale() const {
+    return m_dpiScale * m_settings.fontSize / kReferenceFontSize;
+}
+
+void ProcessWindow::SetFontSize(float size) {
+    if (size < kMinFontSize) size = kMinFontSize;
+    if (size > kMaxFontSize) size = kMaxFontSize;
+    if (size == m_settings.fontSize) {
+        return;
+    }
+    m_settings.fontSize = size;
+    m_styleDirty = true; // applied before the next frame, never mid-frame
+    SaveSettings();
+    SetStatus("Text size %.0f", size);
+    RequestFrames(2);
 }
 
 RECT ProcessWindow::DefaultPlacement() const {
@@ -595,6 +621,10 @@ void ProcessWindow::LoadSettings() {
     m_settings.groupByName = GetPrivateProfileIntW(kSection, L"GroupByName", 1, m_configPath) ? TRUE : FALSE;
     m_settings.alwaysOnTop = GetPrivateProfileIntW(kSection, L"AlwaysOnTop", 0, m_configPath) ? TRUE : FALSE;
     m_settings.maximized = GetPrivateProfileIntW(kSection, L"Maximized", 0, m_configPath) ? TRUE : FALSE;
+    float fontSize = (float)GetPrivateProfileIntW(kSection, L"FontSize", (int)kDefaultFontSize, m_configPath);
+    if (fontSize < kMinFontSize) fontSize = kMinFontSize;
+    if (fontSize > kMaxFontSize) fontSize = kMaxFontSize;
+    m_settings.fontSize = fontSize;
 
     // GetPrivateProfileInt can't read negative numbers (monitors left of or above the primary).
     const wchar_t* keys[4] = { L"WindowLeft", L"WindowTop", L"WindowRight", L"WindowBottom" };
@@ -621,6 +651,8 @@ void ProcessWindow::SaveSettings() {
     WritePrivateProfileStringW(kSection, L"RefreshMs", buffer, m_configPath);
     WritePrivateProfileStringW(kSection, L"GroupByName", m_settings.groupByName ? L"1" : L"0", m_configPath);
     WritePrivateProfileStringW(kSection, L"AlwaysOnTop", m_settings.alwaysOnTop ? L"1" : L"0", m_configPath);
+    swprintf_s(buffer, L"%.0f", m_settings.fontSize);
+    WritePrivateProfileStringW(kSection, L"FontSize", buffer, m_configPath);
 
     WINDOWPLACEMENT placement;
     placement.length = sizeof(placement);
@@ -1178,8 +1210,16 @@ void ProcessWindow::DrawUi() {
     ImGui::End();
 }
 
+// Continues the toolbar row, or starts a new one when an item this wide no longer fits.
+static void ToolbarSameLine(float itemWidth) {
+    ImGui::SameLine();
+    if (ImGui::GetContentRegionAvail().x < itemWidth) {
+        ImGui::NewLine();
+    }
+}
+
 void ProcessWindow::DrawToolbar() {
-    const float scale = m_dpiScale;
+    const float scale = UiScale();
 
     if (m_focusFilter) {
         ImGui::SetKeyboardFocusHere();
@@ -1190,7 +1230,11 @@ void ProcessWindow::DrawToolbar() {
         m_viewDirty = true;
     }
 
-    ImGui::SameLine();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float checkboxExtra = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x;
+    const float buttonExtra = style.FramePadding.x * 2.0f;
+
+    ToolbarSameLine(checkboxExtra + ImGui::CalcTextSize("Group by name").x);
     bool groupByName = m_settings.groupByName != FALSE;
     if (ImGui::Checkbox("Group by name", &groupByName)) {
         m_settings.groupByName = groupByName ? TRUE : FALSE;
@@ -1198,7 +1242,7 @@ void ProcessWindow::DrawToolbar() {
         SaveSettings();
     }
 
-    ImGui::SameLine();
+    ToolbarSameLine(ImGui::CalcTextSize("Update:").x + style.ItemSpacing.x + 118.0f * scale);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Update:");
     ImGui::SameLine();
@@ -1219,13 +1263,13 @@ void ProcessWindow::DrawToolbar() {
         ImGui::EndCombo();
     }
     if (m_settings.refreshMs == 0) {
-        ImGui::SameLine();
+        ToolbarSameLine(ImGui::CalcTextSize("Refresh (F5)").x + buttonExtra);
         if (ImGui::Button("Refresh (F5)")) {
             m_sampleRequested = true;
         }
     }
 
-    ImGui::SameLine();
+    ToolbarSameLine(checkboxExtra + ImGui::CalcTextSize("Always on top").x);
     bool alwaysOnTop = m_settings.alwaysOnTop != FALSE;
     if (ImGui::Checkbox("Always on top", &alwaysOnTop)) {
         m_settings.alwaysOnTop = alwaysOnTop ? TRUE : FALSE;
@@ -1233,7 +1277,26 @@ void ProcessWindow::DrawToolbar() {
         SaveSettings();
     }
 
-    ImGui::SameLine();
+    ToolbarSameLine(ImGui::CalcTextSize("Text:").x + ImGui::CalcTextSize("-+").x + buttonExtra * 2.0f +
+                    style.ItemInnerSpacing.x * 2.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Text:");
+    ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+    ImGui::BeginDisabled(m_settings.fontSize <= kMinFontSize);
+    if (ImGui::Button("-")) {
+        SetFontSize(m_settings.fontSize - 1.0f);
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Smaller text (Ctrl + mouse wheel, Ctrl+minus; Ctrl+0 resets)");
+    ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+    ImGui::BeginDisabled(m_settings.fontSize >= kMaxFontSize);
+    if (ImGui::Button("+")) {
+        SetFontSize(m_settings.fontSize + 1.0f);
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Larger text (Ctrl + mouse wheel, Ctrl+plus; Ctrl+0 resets)");
+
+    ToolbarSameLine(ImGui::CalcTextSize("End task").x + buttonExtra);
     ImGui::BeginDisabled(m_selectedLine < 0);
     if (ImGui::Button("End task")) {
         if (CollectSelectionPids()) {
@@ -1241,46 +1304,41 @@ void ProcessWindow::DrawToolbar() {
         }
     }
     ImGui::EndDisabled();
+}
 
-    // Administrator state, right-aligned when there is room.
-    char adminText[128];
-    ImVec4 adminColor(0.55f, 0.85f, 0.55f, 1.0f);
-    bool showRestartButton = false;
+// Administrator state for the status bar's right end: a restart button, or the ETW state.
+void ProcessWindow::GetAdminStatus(char* text, size_t textSize, bool* isButton, ImVec4* color) const {
+    *isButton = false;
+    *color = ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
     if (m_etw.IsRunning()) {
-        snprintf(adminText, sizeof(adminText), "Administrator: disk and network on");
+        snprintf(text, textSize, "Administrator: disk and network on");
     } else if (m_elevated) {
-        snprintf(adminText, sizeof(adminText), "Disk/network unavailable (ETW error %lu)", m_etw.GetStartError());
-        adminColor = ImVec4(1.0f, 0.65f, 0.25f, 1.0f);
+        snprintf(text, textSize, "Disk/network unavailable (ETW error %lu)", m_etw.GetStartError());
+        *color = ImVec4(1.0f, 0.65f, 0.25f, 1.0f);
     } else {
-        snprintf(adminText, sizeof(adminText), "Restart as administrator");
-        showRestartButton = true;
+        snprintf(text, textSize, "Restart as administrator");
+        *isButton = true;
     }
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const float adminWidth = ImGui::CalcTextSize(adminText).x + (showRestartButton ? style.FramePadding.x * 2.0f : 0.0f);
-    ImGui::SameLine();
-    const float available = ImGui::GetContentRegionAvail().x;
-    if (available > adminWidth) {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + available - adminWidth);
-    } else {
-        ImGui::NewLine();
-    }
-    if (showRestartButton) {
-        if (ImGui::Button(adminText) && m_notifyWindow != NULL) {
+}
+
+void ProcessWindow::DrawAdminStatus(const char* text, bool isButton, const ImVec4& color) {
+    if (isButton) {
+        if (ImGui::Button(text) && m_notifyWindow != NULL) {
             PostMessageW(m_notifyWindow, WM_COREGAZE_RESTART_ELEVATED, 0, 0);
         }
         ImGui::SetItemTooltip("Per-process Disk and Network need administrator rights\n"
                               "(Windows only lets administrators read the kernel's I/O events).\n"
                               "CoreGaze restarts elevated after a UAC prompt.");
-    } else {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(adminColor, "%s", adminText);
-        if (m_etw.IsRunning()) {
-            ImGui::SetItemTooltip("Kernel ETW session active while this window is open.\nEvents lost: %lu, dropped: %llu",
-                                  m_etw.GetLostEventCount(), m_etw.GetDroppedEventCount());
-        } else if (m_elevated) {
-            ImGui::SetItemTooltip("The kernel ETW session could not be started.\n"
-                                  "Another tool may be using too many kernel sessions.");
-        }
+        return;
+    }
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(color, "%s", text);
+    if (m_etw.IsRunning()) {
+        ImGui::SetItemTooltip("Kernel ETW session active while this window is open.\nEvents lost: %lu, dropped: %llu",
+                              m_etw.GetLostEventCount(), m_etw.GetDroppedEventCount());
+    } else if (m_elevated) {
+        ImGui::SetItemTooltip("The kernel ETW session could not be started.\n"
+                              "Another tool may be using too many kernel sessions.");
     }
 }
 
@@ -1295,14 +1353,35 @@ void ProcessWindow::DrawTable() {
     if (size.y < ImGui::GetFrameHeight() * 3.0f) {
         size.y = ImGui::GetFrameHeight() * 3.0f;
     }
-    if (!ImGui::BeginTable("processes", COL_COUNT, flags, size)) {
+    // With large text or a narrow window, the fixed columns can take all the width and squeeze the
+    // (stretching) Name column to nothing. Then the table scrolls sideways instead: its inner width
+    // is last frame's fixed columns plus a minimum Name width.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    float innerWidth = size.x;
+    const ImGuiTable* previous = ImGui::TableFindByID(ImGui::GetID("processes"));
+    if (previous != NULL) {
+        float needed = kMinNameWidth * UiScale();
+        for (int c = 0; c < previous->ColumnsCount; ++c) {
+            const ImGuiTableColumn& column = previous->Columns[c];
+            if (column.IsEnabled && (column.Flags & ImGuiTableColumnFlags_WidthStretch) == 0) {
+                needed += column.WidthGiven + style.CellPadding.x * 2.0f + 1.0f;
+            }
+        }
+        if (previous->InnerWindow != NULL && previous->InnerWindow->ScrollbarY) {
+            innerWidth -= style.ScrollbarSize;
+        }
+        if (needed > innerWidth) {
+            innerWidth = needed;
+        }
+    }
+    if (!ImGui::BeginTable("processes", COL_COUNT, flags | ImGuiTableFlags_ScrollX, size, innerWidth)) {
         return;
     }
 
     for (int c = 0; c < COL_COUNT; ++c) {
-        ImGui::TableSetupColumn(kColumns[c].name, kColumns[c].flags, kColumns[c].width * m_dpiScale, (ImGuiID)c);
+        ImGui::TableSetupColumn(kColumns[c].name, kColumns[c].flags, kColumns[c].width * UiScale(), (ImGuiID)c);
     }
-    ImGui::TableSetupScrollFreeze(0, 2); // header + totals row stay visible
+    ImGui::TableSetupScrollFreeze(1, 2); // header + totals row, and the first column when scrolling sideways
 
     ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
     if (sortSpecs != NULL && sortSpecs->SpecsDirty) {
@@ -1664,6 +1743,19 @@ void ProcessWindow::DrawStatusBar() {
     const double usedGb = (double)(m_memoryStatus.ullTotalPhys - m_memoryStatus.ullAvailPhys) / gigabyte;
     const double totalGb = (double)m_memoryStatus.ullTotalPhys / gigabyte;
 
+    // The administrator state sits at the right end; the text to its left is clipped short of it.
+    char adminText[128];
+    bool adminIsButton = false;
+    ImVec4 adminColor;
+    GetAdminStatus(adminText, sizeof(adminText), &adminIsButton, &adminColor);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float adminWidth = ImGui::CalcTextSize(adminText).x + (adminIsButton ? style.FramePadding.x * 2.0f : 0.0f);
+    const float lineStartX = ImGui::GetCursorPosX();
+    const float adminX = lineStartX + ImGui::GetContentRegionAvail().x - adminWidth;
+    const ImVec2 lineStart = ImGui::GetCursorScreenPos();
+    const float clipRight = lineStart.x + (adminX - lineStartX) - style.ItemSpacing.x * 2.0f;
+    ImGui::PushClipRect(lineStart, ImVec2(clipRight, lineStart.y + ImGui::GetFrameHeight()), true);
+
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("Processes %u   Threads %u   Handles %u   CPU %.0f%%   Memory %.1f / %.1f GB (%lu%%)%s",
                         totals.processCount, totals.threadCount, totals.handleCount, totals.cpuPercent,
@@ -1673,10 +1765,17 @@ void ProcessWindow::DrawStatusBar() {
         if (GetTickCount64() >= m_statusExpireTick) {
             m_statusText[0] = '\0';
         } else {
-            ImGui::SameLine(0.0f, 24.0f * m_dpiScale);
+            ImGui::SameLine(0.0f, 24.0f * UiScale());
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f), "%s", m_statusText);
         }
     }
+    ImGui::PopClipRect();
+
+    ImGui::SameLine();
+    if (adminX > ImGui::GetCursorPosX()) {
+        ImGui::SetCursorPosX(adminX);
+    }
+    DrawAdminStatus(adminText, adminIsButton, adminColor);
 }
 
 void ProcessWindow::HandleKeyboard() {
@@ -1690,6 +1789,20 @@ void ProcessWindow::HandleKeyboard() {
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
         m_sampleRequested = true;
+    }
+    if (io.KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
+            SetFontSize(m_settings.fontSize + 1.0f);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract)) {
+            SetFontSize(m_settings.fontSize - 1.0f);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_0, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad0, false)) {
+            SetFontSize(kDefaultFontSize);
+            return;
+        }
     }
     if (io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && m_filter[0] != '\0') {
@@ -1908,6 +2021,14 @@ LRESULT WINAPI ProcessWindow::WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 }
 
 LRESULT ProcessWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Ctrl + mouse wheel changes the text size. It is handled before ImGui, which would scroll too.
+    if (msg == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0) {
+        const short delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (delta != 0) {
+            SetFontSize(m_settings.fontSize + (delta > 0 ? 1.0f : -1.0f));
+        }
+        return 0;
+    }
     if (m_imgui != NULL) {
         ImGuiContext* previous = ImGui::GetCurrentContext();
         ImGui::SetCurrentContext(m_imgui);

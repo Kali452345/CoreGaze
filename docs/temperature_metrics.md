@@ -30,6 +30,11 @@ Temperatures are sampled on their own timers inside `SystemMonitor::PollMetrics`
 - Drives that report a seek penalty (spinning HDDs) are skipped, because a SMART read can spin up a sleeping disk.
 - A drive that has never answered (USB bridges, card readers, RAID, some SATA controllers) is not queried again until the next disk topology rebuild. A drive that answered before and then fails once gets another try.
 - Several volumes on one physical disk share one reading per cycle.
+- The reads run on a thread-pool thread (`PollDiskTemperatures` submits, `ApplyDiskTemperatureResults` applies on a later poll), never on the UI thread.
+  - Some drives take about 2 s to reject the query. On the development machine, two USB/SATA drives did.
+  - Read synchronously, that froze the HUD, and delayed the first process-window sample at startup, by 2 s at every topology rebuild: startup, unlock, resume, display on.
+  - Readings therefore appear up to one poll after the read finishes, about 2 s after start.
+  - At exit, the destructor waits for a read in progress.
 - Thresholds use the drive's own `WarningTemperature` / `CriticalTemperature` (NVMe WCTEMP/CCTEMP) when valid; otherwise `70 °C` / `80 °C`.
 
 ## HUD

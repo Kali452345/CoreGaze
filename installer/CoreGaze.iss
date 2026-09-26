@@ -95,7 +95,7 @@ Source: "..\installer\prereqs\vc_redist.x64.exe"; DestDir: "{tmp}"; DestName: "v
 Type: files; Name: "{app}\TaskManagerOverlay.exe"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CoreGaze"; ValueData: """{app}\CoreGaze.exe"""; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CoreGaze"; ValueData: """{app}\CoreGaze.exe"" --background"; Tasks: startup; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CoreGaze"; Check: not WizardIsTaskSelected('startup'); Flags: deletevalue
 
 [Icons]

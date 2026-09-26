@@ -15,7 +15,7 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
 - Metric visibility toggles (CPU, RAM, GPU, Disk, Network).
 - Polling cadence (`500ms`, `1000ms`, `2000ms`).
 - Disk drive selection (fixed drives only), plus `Select All` / `Select None`.
-- Launch on Windows startup toggle (HKCU Run key).
+- Launch on Windows startup toggle (HKCU Run key, started with `--background`).
 - `Always Run as Administrator`: registers or deletes the elevated scheduled task (UAC prompt); see `docs/elevation.md`.
 - `Restart as Administrator` (only when not elevated): relaunches CoreGaze through UAC.
 - `Exit / Quit`.

@@ -42,7 +42,7 @@ CoreGaze ships with an Inno Setup installer script at `installer/CoreGaze.iss`.
 
 ## Startup Option
 - Installer now includes a startup task: `Start CoreGaze automatically when I sign in`.
-- When selected, installer writes `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\CoreGaze` to launch CoreGaze at user sign-in.
+- When selected, installer writes `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\CoreGaze` to launch CoreGaze at user sign-in, with `--background` so only the overlay and tray icon start.
 - If not selected, installer removes that value during install to keep startup disabled.
 
 ## GitHub Releases

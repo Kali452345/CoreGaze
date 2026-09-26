@@ -7,9 +7,12 @@
 
 class SystemMonitor;
 struct ImGuiContext;
+struct ImVec4;
 
 // Posted to the notify window when the user asks to restart CoreGaze as administrator.
 static const UINT WM_COREGAZE_RESTART_ELEVATED = WM_APP + 110;
+// Posted to the running instance by a second start of CoreGaze: show the process window.
+static const UINT WM_COREGAZE_OPEN_PROCESSES = WM_APP + 111;
 
 // Task Manager-style process list in its own top-level window, opened on demand.
 //
@@ -91,6 +94,7 @@ private:
         BOOL hasPlacement;
         RECT placement;     // normal (restored) window rect, physical pixels
         BOOL maximized;
+        float fontSize;     // text size at 100% scaling, in pixels
     };
 
     // Window, rendering
@@ -177,6 +181,8 @@ private:
     void LoadSettings();
     void SaveSettings();
     void ApplyAlwaysOnTop();
+    void SetFontSize(float size);
+    float UiScale() const;         // DPI scale times the text size relative to the reference size
     RECT DefaultPlacement() const;
 
     // Scheduling
@@ -208,6 +214,8 @@ private:
     void DrawContextMenu();
     void DrawEndTaskConfirm();
     void DrawStatusBar();
+    void GetAdminStatus(char* text, size_t textSize, bool* isButton, ImVec4* color) const;
+    void DrawAdminStatus(const char* text, bool isButton, const ImVec4& color);
     void HandleKeyboard();
 
     // Actions

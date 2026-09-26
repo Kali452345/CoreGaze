@@ -7,6 +7,8 @@ CoreGaze supports a tray toggle for launching at Windows sign-in.
 - State is persisted in config (`[General] StartWithWindows`) and mirrored to HKCU Run.
 - Startup scope is current-user only, no elevation required.
 - Installer also exposes an optional startup task (`Start CoreGaze automatically when I sign in`) that seeds the same HKCU Run value during install.
+- The Run value is `"<path>\CoreGaze.exe" --background`. At sign-in CoreGaze starts with only the overlay and the tray icon; any other start also opens the process window (`docs/process_window.md`).
+  - `LoadAppSettings` rewrites the value on every start while the setting is on. An entry written by an older version, without `--background`, is therefore updated the first time the new version runs.
 
 ## APIs Used
 - `RegOpenKeyExW`

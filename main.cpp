@@ -211,6 +211,7 @@ static void WriteStringSetting(const wchar_t* section, const wchar_t* key, const
 static void CleanupSingleInstanceMutex();
 static void RemoveLegacyExecutableIfPresent();
 static bool AcquireSingleInstanceMutex(DWORD retryMs);
+static void ActivateRunningInstance();
 static void OpenProcessWindow(HWND hwnd);
 static void RestartElevated(HWND hwnd);
 static void ToggleAlwaysElevated(HWND hwnd);
@@ -229,7 +230,13 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     WaitForPreviousInstanceFromCommandLine();
     // The elevated scheduled task is started by a non-elevated instance that exits right after.
     const bool startedFromTask = HasCommandLineFlag(L"--from-task");
+    // "--background" (the Run key at sign-in) starts with only the overlay and the tray icon.
+    const bool startInBackground = HasCommandLineFlag(L"--background");
     if (!AcquireSingleInstanceMutex(startedFromTask ? 5000 : 0)) {
+        // Starting CoreGaze again while it runs shows the running instance's process window.
+        if (!startedFromTask && !startInBackground) {
+            ActivateRunningInstance();
+        }
         return 0;
     }
 
@@ -249,16 +256,27 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     LoadAppSettings();
 
+    // The process window is CoreGaze's main window and opens at every start except "--background".
+    // The scheduled task can't pass arguments, so the instance that hands over to it leaves
+    // [General] HandoffBackground behind instead.
+    bool openProcessWindow = !startInBackground;
+    if (startedFromTask) {
+        openProcessWindow = GetPrivateProfileIntW(L"General", L"HandoffBackground", 0, g_configPath) == 0;
+        WriteStringSetting(L"General", L"HandoffBackground", NULL);
+    }
+
     // "Always run as administrator": a non-elevated start (Run key at sign-in, Start menu) hands over
     // to the elevated scheduled task, which starts without a UAC prompt. If that fails, carry on
     // without administrator rights.
     const bool elevated = IsProcessElevated();
     if (g_appSettings.alwaysElevated && !elevated && !startedFromTask && !HasCommandLineFlag(L"--no-elevate")) {
         CleanupSingleInstanceMutex();
+        WriteStringSetting(L"General", L"HandoffBackground", openProcessWindow ? NULL : L"1");
         if (RunElevatedTask()) {
             CoUninitialize();
             return 0;
         }
+        WriteStringSetting(L"General", L"HandoffBackground", NULL);
         if (!AcquireSingleInstanceMutex(0)) {
             CoUninitialize();
             return 0;
@@ -366,7 +384,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         kProcessesHotkeyModifiers,
         kProcessesHotkeyVirtualKey);
 
-    if (HasCommandLineFlag(L"--open-processes")) {
+    if (openProcessWindow) {
         OpenProcessWindow(hwnd);
     }
 
@@ -956,7 +974,7 @@ static void SetStartupEnabledInRegistry(BOOL enabled) {
         DWORD modulePathLength = GetModuleFileNameW(NULL, modulePath, MAX_PATH);
         if (modulePathLength > 0 && modulePathLength < MAX_PATH) {
             wchar_t quotedPath[MAX_PATH * 2] = {};
-            swprintf_s(quotedPath, L"\"%ls\"", modulePath);
+            swprintf_s(quotedPath, L"\"%ls\" --background", modulePath);
             RegSetValueExW(keyHandle, kStartupRegistryValueName, 0, REG_SZ, (const BYTE*)quotedPath, (DWORD)((wcslen(quotedPath) + 1) * sizeof(wchar_t)));
         }
     } else {
@@ -1526,6 +1544,8 @@ void InitializeTrayIcon(HWND hwnd, HINSTANCE hInstance) {
     // When CoreGaze runs elevated, UIPI drops messages from the (non-elevated) Explorer that owns the
     // notification area; allow the tray callback through.
     ChangeWindowMessageFilterEx(hwnd, WM_TRAYICON, MSGFLT_ALLOW, NULL);
+    // Likewise for a second, non-elevated start asking an elevated instance to show its window.
+    ChangeWindowMessageFilterEx(hwnd, WM_COREGAZE_OPEN_PROCESSES, MSGFLT_ALLOW, NULL);
     Shell_NotifyIconW(NIM_ADD, &g_trayIconData);
 }
 
@@ -1892,6 +1912,9 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_COREGAZE_RESTART_ELEVATED:
         RestartElevated(hWnd);
         return 0;
+    case WM_COREGAZE_OPEN_PROCESSES:
+        OpenProcessWindow(hWnd);
+        return 0;
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
             ShowTrayContextMenu(hWnd);
@@ -1990,6 +2013,21 @@ static bool AcquireSingleInstanceMutex(DWORD retryMs) {
     }
 }
 
+// A second start found CoreGaze already running: ask it to show its process window. Having just
+// been started by the user, this process may give the running one the right to take the foreground.
+static void ActivateRunningInstance() {
+    HWND running = FindWindowW(kWindowClassName, kWindowTitle);
+    if (running == NULL) {
+        return;
+    }
+    DWORD runningPid = 0;
+    GetWindowThreadProcessId(running, &runningPid);
+    if (runningPid != 0) {
+        AllowSetForegroundWindow(runningPid);
+    }
+    PostMessageW(running, WM_COREGAZE_OPEN_PROCESSES, 0, 0);
+}
+
 static void OpenProcessWindow(HWND hwnd) {
     if (!g_processWindow.Open(g_instance, g_pd3dDevice, g_pd3dDeviceContext, g_systemMonitor, hwnd,
                               g_configPath, g_appIconLarge, g_appIconSmall)) {
@@ -2003,7 +2041,7 @@ static void RestartElevated(HWND hwnd) {
         return;
     }
     DWORD error = ERROR_SUCCESS;
-    if (RelaunchElevated(g_processWindow.IsOpen() ? L"--open-processes" : L"", &error)) {
+    if (RelaunchElevated(g_processWindow.IsOpen() ? L"" : L"--background", &error)) {
         DestroyWindow(hwnd);
     } else if (error != ERROR_CANCELLED) {
         wchar_t text[160];
@@ -2045,9 +2083,11 @@ static void ToggleAlwaysElevated(HWND hwnd) {
         MessageBoxW(NULL, L"CoreGaze will run as administrator from its next start.\n\nRestart it as administrator now?",
                     kWindowTitle, MB_YESNO | MB_ICONQUESTION) == IDYES) {
         // The task instance waits (--from-task) for this one to release the single-instance mutex.
+        WriteStringSetting(L"General", L"HandoffBackground", g_processWindow.IsOpen() ? NULL : L"1");
         if (RunElevatedTask()) {
             DestroyWindow(hwnd);
         } else {
+            WriteStringSetting(L"General", L"HandoffBackground", NULL);
             RestartElevated(hwnd);
         }
     }

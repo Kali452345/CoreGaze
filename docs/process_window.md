@@ -3,11 +3,14 @@
 `ProcessWindow` (`ProcessWindow.h` / `ProcessWindow.cpp`) is CoreGaze's process list: a normal, resizable top-level window with a sortable, filterable table of every process. It is built to cost a fraction of Task Manager.
 
 ## Opening It
+The process window is CoreGaze's main window:
+- **Starting CoreGaze** (Start menu, desktop shortcut, the installer's "Launch CoreGaze") opens it, together with the overlay.
+- **Starting CoreGaze again** while it runs brings the running instance's window up. The second process posts `WM_COREGAZE_OPEN_PROCESSES` to the HUD window and exits; see `docs/single_instance.md`.
+- **Sign-in** is the exception: the Run key starts `CoreGaze.exe --background`, which starts with only the overlay and the tray icon.
 - Tray menu: **Processes...** (the first and default item).
 - Hotkey: **Ctrl+Shift+Alt+P**. Ctrl+Shift+P alone was avoided because editors and browsers use it.
-- Command line: `CoreGaze.exe --open-processes`. "Restart as administrator" uses this flag to reopen the window.
 
-If the window is already open, these bring it to the front. Closing the window only hides the list; CoreGaze keeps running in the tray.
+If the window is already open, these bring it to the front. Closing the window only hides the list; CoreGaze keeps running in the tray with the overlay.
 
 ## Cost Model
 Nothing exists until the window opens. Closing it frees everything:
@@ -45,7 +48,19 @@ Every entry point (`Tick`/`RenderFrame` and the window procedure) switches to th
 
 While the user drags the window border, Windows runs its own modal loop and the main loop doesn't run. `WM_SIZE` therefore resizes the swap chain and draws a frame directly.
 
-The window follows per-monitor DPI (`WM_DPICHANGED`): the style is scaled with `ScaleAllSizes`, and the 15 px Segoe UI font is rasterized at the monitor's scale through `FontScaleDpi`.
+The window follows per-monitor DPI (`WM_DPICHANGED`): the style is scaled with `ScaleAllSizes`, and the Segoe UI font is rasterized at the monitor's scale through `FontScaleDpi`.
+
+## Text Size
+The text is 17 px at 100% scaling by default (it was 15 px). Change it with:
+- **Ctrl + mouse wheel**;
+- **Ctrl+plus / Ctrl+minus**, and **Ctrl+0** to reset;
+- the toolbar's **Text: - +** buttons.
+
+The range is 12-28 px, saved as `[Processes] FontSize`.
+- Spacing, toolbar widths and default column widths scale with the text size (`UiScale()` = DPI scale x size / 15). The layout was designed at 15 px.
+- ImGui 1.92 rasterizes glyphs on demand, so a size change only sets `style.FontSizeBase` and doesn't rebuild the font atlas.
+- Saved column widths follow automatically: ImGui scales them by the font size change (`RefScale` in `processes_table.ini`).
+- Ctrl + wheel is handled in the window procedure before ImGui, so it doesn't also scroll the table.
 
 ## Table
 | Column | Meaning |
@@ -91,7 +106,7 @@ Right-click a row, or use the toolbar's **End task** button:
 Without administrator rights, elevated and service processes can't be ended, reprioritized or located. The status bar suggests **Restart as administrator** when that happens.
 
 ## Administrator Mode
-When CoreGaze is not elevated, the toolbar's right side shows a **Restart as administrator** button. It posts `WM_COREGAZE_RESTART_ELEVATED` to the HUD window, which relaunches CoreGaze through UAC with `--open-processes` (see `docs/elevation.md`).
+When CoreGaze is not elevated, the toolbar's right side shows a **Restart as administrator** button. It posts `WM_COREGAZE_RESTART_ELEVATED` to the HUD window, which relaunches CoreGaze through UAC (see `docs/elevation.md`). The elevated copy opens the process window, because it was open.
 
 When elevated, opening the window starts the ETW kernel session that feeds the Disk and Network columns (see `docs/etw_disk_network.md`). Closing the window stops it. The toolbar shows "Administrator: disk and network on". If the session can't start, it shows the error code.
 
@@ -105,8 +120,9 @@ Stored in `config.ini` under `[Processes]`:
 | `AlwaysOnTop` | 1 = keep the window above others |
 | `WindowLeft/Top/Right/Bottom` | Normal (restored) placement, in workspace coordinates |
 | `Maximized` | 1 = open maximized |
+| `FontSize` | Text size at 100% scaling, 12-28 (default 17) |
 
-A saved placement that is no longer on any monitor is ignored, and the window opens centered on the primary monitor at 1000x640 (at 100% scaling).
+A saved placement that is no longer on any monitor is ignored, and the window opens centered on the primary monitor at 1120x680 (at 100% scaling).
 
 ## Main Loop Integration
 - `ProcessWindow::Tick()` runs every main-loop iteration while the window is open. It samples and draws when due, and returns how long the loop may sleep.

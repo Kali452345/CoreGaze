@@ -642,3 +642,15 @@
 
 **Immediate Next Steps:**
 - Rebuild `build\`, relaunch, and spot-check ALT + drag and toggling rows.
+
+## 2026-09-26: HUD CPU Back to % Processor Time
+
+**Summary of Work Done:**
+- Reverted the CPU counter from `% Processor Utility` to `\Processor(_Total)\% Processor Time`. The earlier switch was based on outdated information: since KB5064081 (August 2025, Windows 11 24H2/25H2), Task Manager computes CPU as Δ(user+kernel time) / (Δelapsed × logical processors) on every page. The frequency-scaled Utility value is only in its optional "CPU Utility" column.
+- On this machine (build 26200.9457) the two counters read 16.6% (Utility) vs 24.0% (Time) at low clocks, so the HUD had been under-reporting relative to Task Manager.
+
+**Current State:**
+- Builds clean. `docs/pdh_metrics.md` and `docs/system_monitor.md` updated.
+
+**Immediate Next Steps:**
+- Process manager, Phase 1: `ProcessMonitor` collector (NtQuerySystemInformation snapshot, per-process CPU/memory/I-O/GPU deltas) with a cost benchmark.

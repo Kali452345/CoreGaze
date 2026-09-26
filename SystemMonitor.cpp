@@ -379,11 +379,10 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
     }
 
     if (PdhOpenQueryA(NULL, 0, &m_pdhQuery) == ERROR_SUCCESS) {
-        // % Processor Utility is what Task Manager shows: busy time scaled by the actual clock, so it
-        // accounts for turbo and power-saving frequencies. Older systems fall back to plain busy time.
-        if (PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor Information(_Total)\\% Processor Utility", 0, &m_pdhCpuCounter) != ERROR_SUCCESS) {
-            PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor(_Total)\\% Processor Time", 0, &m_pdhCpuCounter);
-        }
+        // % Processor Time (busy time / elapsed time across all logical processors) is what Task Manager
+        // shows since KB5064081 (Windows 11 24H2/25H2, Aug 2025). The older frequency-scaled
+        // % Processor Utility now only appears in Task Manager's optional "CPU Utility" column.
+        PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor(_Total)\\% Processor Time", 0, &m_pdhCpuCounter);
         PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor Information(_Total)\\% Processor Performance", 0, &m_pdhCpuPerfCounter);
         if (PdhAddEnglishCounterW(m_pdhQuery, L"\\PhysicalDisk(*)\\% Disk Time", 0, &m_pdhDiskInstanceCounter) != ERROR_SUCCESS) {
             m_pdhDiskInstanceCounter = NULL;

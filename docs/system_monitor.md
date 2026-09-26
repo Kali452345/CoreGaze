@@ -24,7 +24,7 @@ The monitor supports runtime control from tray settings:
 - `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
 
 ## CPU and RAM Collection
-- CPU utilization: `\Processor Information(_Total)\% Processor Utility` via PDH (what Task Manager shows), falling back to `\Processor(_Total)\% Processor Time`.
+- CPU utilization: `\Processor(_Total)\% Processor Time` via PDH, which is what Task Manager shows since KB5064081 (Windows 11 24H2/25H2).
 - CPU GHz: registry base MHz + PDH `\Processor Information(_Total)\% Processor Performance`.
 - RAM: `GlobalMemoryStatusEx`.
 

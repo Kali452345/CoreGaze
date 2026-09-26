@@ -5,7 +5,7 @@ PDH remains the main source for CPU, GPU engine utilization, and disk activity c
 ## PDH Counter Coverage
 
 ## CPU
-- `\Processor Information(_Total)\% Processor Utility`: the utilization Task Manager shows. It scales busy time by the actual clock, so it reflects turbo and power-saving frequencies and can differ noticeably from `% Processor Time`. Falls back to `\Processor(_Total)\% Processor Time` on systems without it (pre-Windows 8).
+- `\Processor(_Total)\% Processor Time`: busy time over elapsed time across all logical processors. Since KB5064081 (Windows 11 24H2/25H2, August 2025) this is what Task Manager shows on every page. The frequency-scaled `% Processor Utility` it used before can differ by several points either way (measured 16.6% vs 24.0% at low clocks) and is now only in Task Manager's optional "CPU Utility" column.
 - `\Processor Information(_Total)\% Processor Performance`: current clock relative to base, used for the GHz readout.
 
 ## GPU

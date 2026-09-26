@@ -32,9 +32,9 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
   - enable/disable secondary monitoring
   - manual secondary adapter pick
 - Network display mode submenu:
-  - Primary total Mbps
   - Primary RX/TX split
   - Primary + Secondary RX/TX
+  - (The former `Primary total Mbps` entry was removed because the HUD always renders split bars; a saved value of `0` loads as split.)
 
 ## Persistence Keys
 - `Display`: `VisibleMask`, `OverlayVisible`

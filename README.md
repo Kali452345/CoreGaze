@@ -12,14 +12,16 @@ CoreGaze is a lightweight Windows resource-monitor overlay built with C++, Win32
 
 ## Requirements
 - Windows 10/11 (x64)
-- CMake + Ninja (or a compatible CMake generator)
-- A C++ toolchain compatible with this project setup
-- Inno Setup 6 (`ISCC.exe`) for installer generation
+- CMake 3.20+
+- MinGW-w64 toolchain (for example [w64devkit](https://github.com/skeeto/w64devkit); `build-release.ps1` picks it up automatically from `%LOCALAPPDATA%\w64devkit\bin`)
+- Inno Setup 6 (`ISCC.exe`) for installer generation (`build-installer.ps1` offers to install it via winget)
+
+MinGW builds link the C++ runtime statically, so end users do not need the Visual C++ Redistributable.
 
 ## Build (Local)
 ```powershell
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
 ## One-Command Unsigned Release (Build + Installer)
@@ -27,16 +29,11 @@ cmake --build build --config Release
 ./scripts/build-release.ps1
 ```
 
-This flow:
-- Builds the app in release mode.
-- Ensures `vc_redist.x64.exe` is present (downloads automatically if missing).
-- Bundles the runtime bootstrapper into the installer so users do not need to fetch VC++ runtime manually.
-- Produces installer output under `build/installer/`.
-
+This builds `build/CoreGaze.exe` in release mode and produces the installer under `build/installer/`.
 
 ## Installer Only
 ```powershell
-./scripts/build-installer.ps1
+./scripts/build-installer.ps1 -Version 1.0.0
 ```
 
 During setup, you can enable the installer task "Start CoreGaze automatically when I sign in" to configure startup immediately.
@@ -46,12 +43,8 @@ During setup, you can enable the installer task "Start CoreGaze automatically wh
 ./scripts/build-release.ps1 -PerUserInstall
 ```
 
-## Optional: Skip VC++ Bootstrap Bundling
-```powershell
-./scripts/build-release.ps1 -SkipVcRedistDownload
-```
-
-Use this only when you intentionally do not want runtime bootstrap packaging.
+## Publishing a GitHub Release
+Push a `vX.Y.Z` tag (or run the workflow manually). `.github/workflows/github-release.yml` builds with MinGW on the runner, compiles the installer with the tag's version, and attaches `CoreGaze-Setup-X.Y.Z.exe` to the release.
 
 ## Repository
 - GitHub: https://github.com/Kali452345/CoreGaze

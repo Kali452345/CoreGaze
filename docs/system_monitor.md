@@ -1,12 +1,12 @@
 # System Monitor Engine
 
-The `SystemMonitor` component is the native telemetry backend for the overlay. It uses low-level Win32, PDH, DXGI, and WLAN APIs with cadence gating so monitoring overhead stays low while still exposing richer per-source metrics.
+The `SystemMonitor` component is the native telemetry backend for the overlay. It uses low-level Win32, PDH, DXGI, IP Helper, and Network List Manager APIs with cadence gating so monitoring overhead stays low while still exposing richer per-source metrics.
 
 ## Polling Model
 
 ## Cadence Separation
 - Fast cadence (`500ms`, `1000ms`, `2000ms`): numeric counters (CPU, RAM, GPU utilization/memory, disk active/read/write throughput, network RX/TX rates).
-- Slow cadence (~10 seconds): identity resolution and topology refresh (active network source, SSID labels, adapter lists).
+- Network identity (active network source, SSID labels, adapter lists): event-driven, with an adaptive safety timer (`2s` while settling after a network event, `30s` otherwise). See `network_identity.md`.
 
 This split avoids expensive identity/mapping work in the hot polling path.
 
@@ -18,7 +18,7 @@ The monitor supports runtime control from tray settings:
 - `SetGPUDisplayMode(...)`, `SetSelectedGPUAdapterIndex(...)`: GPU output mode/source selection.
 - `SetNetworkPrimaryMode(...)`, `SetNetworkPrimaryIfIndex(...)`: auto/manual primary network source.
 - `SetNetworkSecondaryEnabled(...)`, `SetNetworkSecondaryIfIndex(...)`: optional secondary adapter.
-- `SetNetworkDisplayMode(...)`: total vs split display semantics.
+- `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
 
 ## CPU and RAM Collection
 - CPU utilization: `\Processor(_Total)\% Processor Time` via PDH.
@@ -77,7 +77,7 @@ Disk telemetry is now selected-drive aware:
 
 ## Identity
 - Adapter display names are cached from IP Helper enumeration.
-- Wi-Fi SSID is queried with WLAN APIs and appended when available.
+- Wi-Fi network names come from Network List Manager, matched to each adapter by interface GUID (no WLAN API, so no location indicator).
 
 ## Allocation Strategy
 - Wildcard PDH parsing buffers are reused and grown only when needed.

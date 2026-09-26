@@ -7,15 +7,22 @@ Identity refresh is event-driven.
 
 Refresh sources:
 - legacy IP Helper address-change notifications through `NotifyAddrChange`
-- WLAN connection notifications through `WlanRegisterNotification`
-- throughput failure fallback when the active adapter becomes invalid or disconnects
-- a slow periodic safety refresh if notifications are missed
+- throughput failure fallback when the active adapter becomes invalid, disconnects, or reconnects
+- an adaptive safety timer (see below)
 
 Refresh behavior:
 - event callbacks only toggle atomic request flags and return immediately
 - the main monitor thread performs the adapter enumeration and display rebuild
-- refreshes are debounced so bursts of network events collapse into a single rebuild
-- the fallback timer is intentionally long so it does not recreate the old steady polling pattern
+- event refreshes are debounced (`500ms`) so bursts of network events collapse into a single rebuild
+
+## Adaptive Fallback Timer
+Network List Manager (NLM) often lags behind the address-change event: right after a connect or Wi-Fi switch it can still report `Identifying...` or the previous network's name. The fallback timer therefore has two speeds:
+
+- **Settling (`2s`)**: for `10s` after any event-triggered refresh (and after startup), so the name catches up within 1-2 seconds.
+- **Unresolved Wi-Fi (`2s`)**: while the primary adapter is connected Wi-Fi without a resolved name, for up to `60s` after the last event. After that, networks NLM never names (for example `Unidentified network`) stop forcing fast refreshes.
+- **Steady state (`30s`)**: otherwise. Each refresh enumerates adapters (`GetAdaptersInfo`) and creates an NLM COM instance, so this keeps idle overhead low.
+
+Constants live at the top of `SystemMonitor.cpp` (`kNetworkIdentity*`); the decision is `SystemMonitor::IsNetworkIdentitySettling`.
 
 ## Primary Adapter Selection
 Two modes are supported:
@@ -30,35 +37,30 @@ When enabled:
 - otherwise the best non-primary connected adapter is used
 
 ## Throughput Metrics
-Primary and secondary throughput are sampled independently via interface octet deltas:
+Primary and secondary throughput are sampled independently via interface octet deltas (`GetIfEntry`):
 - download (`rxMbps`)
 - upload (`txMbps`)
 - total (`rx + tx`)
 
-## SSID Labeling
-When the selected adapter is Wi-Fi, the monitor queries WLAN state and uses the SSID as the display label.
+## Network Name (SSID) Labeling
+Network names come from the Network List Manager COM API (`INetworkListManager`), not the WLAN API, so Windows never shows the location-services indicator.
 
-SSID query policy:
-- reuse the cached SSID when the same adapter is still current and the cache is fresh
-- force a new lookup when WLAN notifications indicate a Wi-Fi state change
-- avoid repeating the WLAN query on every refresh burst during reconnect churn
+Per-adapter matching:
+- `IP_ADAPTER_INFO::AdapterName` is the interface GUID string; it is parsed with `CLSIDFromString` and cached per adapter slot.
+- `INetworkListManager::GetNetworkConnections` is enumerated and each connection's `GetAdapterId` is compared with that GUID, so each Wi-Fi adapter only gets the name of its own network. This keeps the label correct when Ethernet and Wi-Fi are both connected, and stops Wi-Fi Direct virtual adapters from inheriting the SSID.
+- `Unidentified network` and `Identifying...` are treated as unresolved.
+- If the adapter GUID cannot be parsed, the lookup falls back to the first connected network (`GetNetworks(NLM_ENUM_NETWORK_CONNECTED)`).
 
 Display policy:
-- Wi-Fi with SSID: show SSID only
-- Connected non-Wi-Fi: show Wired
-- Not connected: show Disconnected
-
-Display caveat:
-- SSID queries still touch WLAN APIs, so Windows may briefly surface the location indicator when a fresh lookup is required; the event-driven path only reduces how often that happens.
+- Wi-Fi with a resolved name: show the name only
+- Wi-Fi without a resolved name: show `Wi-Fi`
+- Connected non-Wi-Fi: show `Wired`
+- Not connected: show `Disconnected`
 
 ## Tray Display Modes
-- Primary Total Mbps
 - Primary RX/TX Split
 - Primary + Secondary RX/TX
 
-These modes only affect presentation; backend still maintains per-source snapshots.
+The primary row always renders as side-by-side download/upload bars. The legacy `Primary Total Mbps` mode (config value `0`) was removed from the tray and is normalized to `Primary RX/TX Split` when loaded.
 
-## Fallback Timer Policy
-- The fallback refresh exists only to recover from missed notifications or stale state.
-- It is intentionally slow and should not produce regular SSID polling.
-- The goal is to keep network identity current without reintroducing a steady WLAN lookup cadence.
+These modes only affect presentation; the backend still maintains per-source snapshots.

@@ -13,7 +13,13 @@
 
 static const float kBytesToGB = 1.0f / (1024.0f * 1024.0f * 1024.0f);
 static const DWORD kAllDriveSelectionMask = 0x03FFFFFFu;
-static const ULONGLONG kNetworkIdentityFallbackRefreshMs = 2000;
+// Identity refresh is event-driven; the timer is only a safety net. After a network event,
+// Network List Manager can lag behind (stale name or "Identifying..."), so the fallback runs
+// fast for a short settling window and then drops to the slow steady-state cadence.
+static const ULONGLONG kNetworkIdentityFallbackRefreshMs = 30000;
+static const ULONGLONG kNetworkIdentitySettlingRefreshMs = 2000;
+static const ULONGLONG kNetworkIdentitySettlingWindowMs = 10000;
+static const ULONGLONG kNetworkIdentityUnresolvedWindowMs = 60000;
 static const ULONGLONG kNetworkIdentityEventDebounceMs = 500;
 
 static DWORD ClampPollingIntervalMs(DWORD pollingIntervalMs) {
@@ -41,7 +47,7 @@ static DWORD ClampNetworkPrimaryMode(DWORD networkPrimaryMode) {
 }
 
 static DWORD ClampNetworkDisplayMode(DWORD networkDisplayMode) {
-    if (networkDisplayMode > NETWORK_DISPLAY_RX_TX_SECONDARY) {
+    if (networkDisplayMode == NETWORK_DISPLAY_TOTAL || networkDisplayMode > NETWORK_DISPLAY_RX_TX_SECONDARY) {
         return NETWORK_DISPLAY_RX_TX;
     }
     return networkDisplayMode;
@@ -132,6 +138,7 @@ bool SystemMonitor::EnsurePdhBuffer(BYTE*& buffer, DWORD& bufferCapacity, DWORD 
 SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
     : m_lastUpdateTime(0),
       m_lastNetworkIdentityRefresh(0),
+      m_lastNetworkIdentityEventTick(0),
       m_networkIdentityRefreshRequested(false),
       m_networkSsidRefreshRequested(false),
       m_networkCallbacksEnabled(false),
@@ -222,6 +229,8 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         m_networkAdapters[i].connected = false;
         m_networkAdapters[i].hasGateway = false;
         m_networkAdapters[i].isWifi = false;
+        m_networkAdapters[i].hasAdapterGuid = false;
+        ZeroMemory(&m_networkAdapters[i].adapterGuid, sizeof(GUID));
         m_networkAdapters[i].adapterName[0] = '\0';
         m_networkAdapters[i].ssid[0] = '\0';
         m_networkAdapters[i].displayName[0] = '\0';
@@ -263,6 +272,8 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
     }
 
     RefreshNetworkIdentityNow();
+    // Treat startup like a network event: at sign-in NLM often still reports "Identifying...".
+    m_lastNetworkIdentityEventTick = GetTickCount64();
 
     m_lastUpdateTime = GetTickCount64();
     PollMetrics();
@@ -456,6 +467,24 @@ void SystemMonitor::RequestNetworkIdentityRefresh() {
     m_networkIdentityRefreshRequested.store(true, std::memory_order_relaxed);
 }
 
+bool SystemMonitor::IsNetworkIdentitySettling(ULONGLONG now) const {
+    const ULONGLONG sinceEventMs = now - m_lastNetworkIdentityEventTick;
+    if (sinceEventMs < kNetworkIdentitySettlingWindowMs) {
+        return true;
+    }
+
+    // Connected Wi-Fi without a resolved name yet: keep retrying a while longer, but give up on
+    // fast polling for networks NLM never names (for example "Unidentified network").
+    if (m_primaryNetworkSlot >= 0 && m_primaryNetworkSlot < (int)m_networkAdapterCount) {
+        const NetworkAdapterSlot* primary = &m_networkAdapters[m_primaryNetworkSlot];
+        if (primary->isWifi && primary->connected && primary->ssid[0] == '\0') {
+            return sinceEventMs < kNetworkIdentityUnresolvedWindowMs;
+        }
+    }
+
+    return false;
+}
+
 VOID CALLBACK SystemMonitor::OnNetworkAddressChangeWaitCallback(PVOID context, BOOLEAN) {
     SystemMonitor* monitor = (SystemMonitor*)context;
     if (monitor == NULL || !monitor->m_networkCallbacksEnabled.load(std::memory_order_relaxed)) {
@@ -608,11 +637,18 @@ void SystemMonitor::PollMetrics() {
 
     if (pollNetwork) {
         ULONGLONG now = GetTickCount64();
-        const bool periodicRefreshDue = (m_lastNetworkIdentityRefresh == 0) || ((now - m_lastNetworkIdentityRefresh) >= kNetworkIdentityFallbackRefreshMs);
+        const ULONGLONG fallbackIntervalMs = IsNetworkIdentitySettling(now)
+            ? kNetworkIdentitySettlingRefreshMs
+            : kNetworkIdentityFallbackRefreshMs;
+        const bool periodicRefreshDue = (m_lastNetworkIdentityRefresh == 0) || ((now - m_lastNetworkIdentityRefresh) >= fallbackIntervalMs);
         const bool eventRefreshPending = m_networkIdentityRefreshRequested.load(std::memory_order_relaxed) ||
             m_networkSsidRefreshRequested.load(std::memory_order_relaxed);
         const bool quickRefreshDue = eventRefreshPending &&
             (m_lastNetworkIdentityRefresh == 0 || (now - m_lastNetworkIdentityRefresh) >= kNetworkIdentityEventDebounceMs);
+
+        if (quickRefreshDue) {
+            m_lastNetworkIdentityEventTick = now;
+        }
 
         if (periodicRefreshDue || quickRefreshDue) {
             RefreshNetworkIdentityNow();
@@ -1498,7 +1534,7 @@ void SystemMonitor::ResetNetworkDeltaState(NetworkDeltaState* state) {
     state->lastSampleTimeMs = 0;
 }
 
-bool SystemMonitor::TryQueryConnectedNetworkName(char* nameBuffer, int nameBufferSize) const {
+bool SystemMonitor::TryQueryConnectedNetworkName(const GUID* adapterGuid, char* nameBuffer, int nameBufferSize) const {
     if (nameBuffer == NULL || nameBufferSize <= 0) {
         return false;
     }
@@ -1515,9 +1551,10 @@ bool SystemMonitor::TryQueryConnectedNetworkName(char* nameBuffer, int nameBuffe
 
     bool success = false;
 
-    // Method 1: GetNetworks(NLM_ENUM_NETWORK_CONNECTED) - direct connected network list
+    // Method 1 (adapter GUID unknown only): first connected network. With a GUID we must not use
+    // this, because it can return another adapter's network (e.g. Ethernet while Wi-Fi is also up).
     IEnumNetworks* pEnumNetworks = NULL;
-    hr = pNLM->GetNetworks(NLM_ENUM_NETWORK_CONNECTED, &pEnumNetworks);
+    hr = adapterGuid == NULL ? pNLM->GetNetworks(NLM_ENUM_NETWORK_CONNECTED, &pEnumNetworks) : E_NOTIMPL;
     if (SUCCEEDED(hr) && pEnumNetworks != NULL) {
         INetwork* pNetwork = NULL;
         ULONG fetched = 0;
@@ -1544,7 +1581,7 @@ bool SystemMonitor::TryQueryConnectedNetworkName(char* nameBuffer, int nameBuffe
         pEnumNetworks->Release();
     }
 
-    // Method 2: Fallback to GetNetworkConnections()
+    // Method 2: per-connection lookup. NLM adapter ids match IP_ADAPTER_INFO::AdapterName GUIDs.
     if (!success) {
         IEnumNetworkConnections* pEnumConnections = NULL;
         hr = pNLM->GetNetworkConnections(&pEnumConnections);
@@ -1552,6 +1589,15 @@ bool SystemMonitor::TryQueryConnectedNetworkName(char* nameBuffer, int nameBuffe
             INetworkConnection* pConnection = NULL;
             ULONG fetched = 0;
             while (pEnumConnections->Next(1, &pConnection, &fetched) == S_OK && fetched > 0 && pConnection != NULL) {
+                if (adapterGuid != NULL) {
+                    GUID connectionAdapterGuid = {};
+                    if (FAILED(pConnection->GetAdapterId(&connectionAdapterGuid)) ||
+                        !IsEqualGUID(connectionAdapterGuid, *adapterGuid)) {
+                        pConnection->Release();
+                        continue;
+                    }
+                }
+
                 INetwork* pNetwork = NULL;
                 hr = pConnection->GetNetwork(&pNetwork);
                 if (SUCCEEDED(hr) && pNetwork != NULL) {
@@ -1642,6 +1688,8 @@ void SystemMonitor::RefreshNetworkIdentity() {
         m_networkAdapters[i].connected = false;
         m_networkAdapters[i].hasGateway = false;
         m_networkAdapters[i].isWifi = false;
+        m_networkAdapters[i].hasAdapterGuid = false;
+        ZeroMemory(&m_networkAdapters[i].adapterGuid, sizeof(GUID));
         m_networkAdapters[i].adapterName[0] = '\0';
         m_networkAdapters[i].ssid[0] = '\0';
         m_networkAdapters[i].displayName[0] = '\0';
@@ -1667,6 +1715,12 @@ void SystemMonitor::RefreshNetworkIdentity() {
                     slot->hasGateway = adapter->GatewayList.IpAddress.String[0] != '\0' && strcmp(adapter->GatewayList.IpAddress.String, "0.0.0.0") != 0;
                     slot->isWifi = (adapter->Type == 71);
 
+                    // AdapterName is the interface GUID string, e.g. "{2BC46643-...}".
+                    wchar_t adapterGuidText[64] = {};
+                    slot->hasAdapterGuid =
+                        MultiByteToWideChar(CP_ACP, 0, adapter->AdapterName, -1, adapterGuidText, (int)(sizeof(adapterGuidText) / sizeof(adapterGuidText[0]))) > 0 &&
+                        SUCCEEDED(CLSIDFromString(adapterGuidText, &slot->adapterGuid));
+
                     MIB_IFROW ifRow;
                     ZeroMemory(&ifRow, sizeof(ifRow));
                     ifRow.dwIndex = adapter->Index;
@@ -1688,7 +1742,7 @@ void SystemMonitor::RefreshNetworkIdentity() {
                     slot->ssid[0] = '\0';
                     slot->lastSsidQueryTick = 0;
                     if (slot->isWifi && slot->connected) {
-                        if (TryQueryConnectedNetworkName(slot->ssid, (int)sizeof(slot->ssid))) {
+                        if (TryQueryConnectedNetworkName(slot->hasAdapterGuid ? &slot->adapterGuid : NULL, slot->ssid, (int)sizeof(slot->ssid))) {
                             slot->lastSsidQueryTick = now;
                         }
                     }

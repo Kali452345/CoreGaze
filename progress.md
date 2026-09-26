@@ -496,3 +496,23 @@
 
 
 
+## 2026-09-26: Release Pipeline Repair and Network Identity Fixes
+
+**Summary of Work Done:**
+- **Release workflow repaired**: `.github/workflows/github-release-dual-installers.yml` called `scripts/build-github-release-assets.ps1`, which was deleted in the v1.0.0 prep commit, and uploaded `-with-vcredist`/`-no-vcredist` installers that no longer exist. Replaced with `.github/workflows/github-release.yml`, which builds with the runner's MinGW-w64 toolchain (static runtime), compiles the installer with the tag's version, and publishes `CoreGaze-Setup-<version>.exe`.
+- **Installer version passthrough fixed**: `CoreGaze.iss` unconditionally redefined `MyAppVersion` as `1.0.0`, silently overriding `build-installer.ps1 -Version`. It is now an `#ifndef` fallback.
+- **Stale VC++ switches removed**: `build-release.ps1` no longer accepts/forwards `-SkipVcRedistDownload` / `-ExcludeVcRedistBundle` (the installer script dropped them when the build moved to MinGW). README and `docs/installer_upgrade.md` updated to the single-installer MinGW flow.
+- **Dead "Primary Total Mbps" tray option removed**: the HUD always renders RX/TX split bars, so the option did nothing. Saved config value `0` now normalizes to split in both `main.cpp` and `SystemMonitor`.
+- **Adaptive network identity fallback**: the safety timer ran every 2s permanently (adapter enumeration + malloc + NLM COM instance each time). It now runs every 2s only while settling (10s after a network event/startup, or up to 60s while connected Wi-Fi is still unnamed) and every 30s otherwise.
+- **Per-adapter SSID matching**: the NLM lookup returned the first connected network regardless of adapter, so a Wi-Fi label could show another adapter's network (and Wi-Fi Direct virtual adapters could inherit the SSID). Adapter GUIDs from `IP_ADAPTER_INFO::AdapterName` are now matched against `INetworkConnection::GetAdapterId`.
+
+**Current State:**
+- Build is clean with w64devkit (only pre-existing `#pragma comment` warnings under MinGW).
+- A test harness linking `SystemMonitor.cpp` confirmed only the real Wi-Fi adapter receives the SSID on a machine with Ethernet + Wi-Fi + two Wi-Fi Direct adapters, and that the legacy total mode normalizes to split.
+- The new release workflow has not yet been run on GitHub Actions.
+
+**Immediate Next Steps:**
+- Trigger the release workflow manually (workflow_dispatch) with a test tag to validate the CI build before tagging a real release.
+- Implement temperature telemetry (ACPI thermal zone via PDH, NVMe via `IOCTL_STORAGE_QUERY_PROPERTY`, GPU via D3DKMT adapter perf data).
+- Follow-ups from review: DPI awareness manifest, pin ImGui version in CMake, single source of truth for the app version, HUD-sized host window.
+

@@ -68,7 +68,6 @@ enum TrayCommandId : UINT {
     ID_TRAY_NETWORK_PRIMARY_BASE = 5610,
     ID_TRAY_NETWORK_SECONDARY_ENABLE = 5630,
     ID_TRAY_NETWORK_SECONDARY_BASE = 5640,
-    ID_TRAY_NETWORK_DISPLAY_TOTAL = 5660,
     ID_TRAY_NETWORK_DISPLAY_RXTX = 5661,
     ID_TRAY_NETWORK_DISPLAY_RXTX_SECONDARY = 5662,
     ID_TRAY_STARTUP_TOGGLE = 5901,
@@ -783,7 +782,8 @@ static DWORD NormalizeNetworkPrimaryMode(DWORD networkPrimaryMode) {
 }
 
 static DWORD NormalizeNetworkDisplayMode(DWORD networkDisplayMode) {
-    if (networkDisplayMode > NETWORK_DISPLAY_RX_TX_SECONDARY) {
+    // The primary row always renders as RX/TX split bars, so the legacy "total" mode maps to split.
+    if (networkDisplayMode == NETWORK_DISPLAY_TOTAL || networkDisplayMode > NETWORK_DISPLAY_RX_TX_SECONDARY) {
         return NETWORK_DISPLAY_RX_TX;
     }
     return networkDisplayMode;
@@ -1385,9 +1385,6 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
             g_appSettings.networkSecondaryIfIndex = 0;
         }
         break;
-    case ID_TRAY_NETWORK_DISPLAY_TOTAL:
-        g_appSettings.networkDisplayMode = NETWORK_DISPLAY_TOTAL;
-        break;
     case ID_TRAY_NETWORK_DISPLAY_RXTX:
         g_appSettings.networkDisplayMode = NETWORK_DISPLAY_RX_TX;
         break;
@@ -1534,7 +1531,6 @@ void ShowTrayContextMenu(HWND hwnd) {
         }
     }
 
-    AppendMenuW(networkDisplayMenu, MF_STRING | CheckedFlag(g_appSettings.networkDisplayMode == NETWORK_DISPLAY_TOTAL), ID_TRAY_NETWORK_DISPLAY_TOTAL, L"Primary Total Mbps");
     AppendMenuW(networkDisplayMenu, MF_STRING | CheckedFlag(g_appSettings.networkDisplayMode == NETWORK_DISPLAY_RX_TX), ID_TRAY_NETWORK_DISPLAY_RXTX, L"Primary RX/TX Split");
     AppendMenuW(networkDisplayMenu, MF_STRING | CheckedFlag(g_appSettings.networkDisplayMode == NETWORK_DISPLAY_RX_TX_SECONDARY), ID_TRAY_NETWORK_DISPLAY_RXTX_SECONDARY, L"Primary + Secondary RX/TX");
 

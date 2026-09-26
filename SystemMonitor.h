@@ -29,7 +29,7 @@ enum NetworkPrimaryMode : DWORD {
 };
 
 enum NetworkDisplayMode : DWORD {
-    NETWORK_DISPLAY_TOTAL = 0,
+    NETWORK_DISPLAY_TOTAL = 0, // Legacy config value only; normalized to NETWORK_DISPLAY_RX_TX.
     NETWORK_DISPLAY_RX_TX = 1,
     NETWORK_DISPLAY_RX_TX_SECONDARY = 2
 };
@@ -179,6 +179,8 @@ private:
         bool connected;
         bool hasGateway;
         bool isWifi;
+        bool hasAdapterGuid;
+        GUID adapterGuid;
         char adapterName[128];
         char ssid[64];
         char displayName[192];
@@ -196,6 +198,7 @@ private:
     // Timing mechanics
     ULONGLONG m_lastUpdateTime;
     ULONGLONG m_lastNetworkIdentityRefresh;
+    ULONGLONG m_lastNetworkIdentityEventTick;
     std::atomic<bool> m_networkIdentityRefreshRequested;
     std::atomic<bool> m_networkSsidRefreshRequested;
     std::atomic<bool> m_networkCallbacksEnabled;
@@ -289,7 +292,8 @@ private:
     int ResolveAutoPrimaryNetworkSlot() const;
     int ResolveAutoSecondaryNetworkSlot(int primarySlot) const;
     void ResetNetworkDeltaState(NetworkDeltaState* state);
-    bool TryQueryConnectedNetworkName(char* nameBuffer, int nameBufferSize) const;
+    bool TryQueryConnectedNetworkName(const GUID* adapterGuid, char* nameBuffer, int nameBufferSize) const;
+    bool IsNetworkIdentitySettling(ULONGLONG now) const;
     void BuildNetworkDisplayName(const NetworkAdapterSlot* adapter, char* output, int outputSize) const;
     void ClearNetworkSnapshots();
     bool EnsurePdhBuffer(BYTE*& buffer, DWORD& bufferCapacity, DWORD requiredSize);

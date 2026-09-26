@@ -22,7 +22,10 @@
   #define SetupSuffix "-vcredist"
 #endif
 
-#define MyAppVersion "1.0.0"
+; build-installer.ps1 passes /DMyAppVersion=<version>; this is only the fallback.
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
 
 [Setup]
 AppId={{9D12F5E7-AEF7-4A3C-93F3-2AABFD6130D7}}

@@ -3,9 +3,7 @@ param(
     [string]$BuildDirectory = "$PSScriptRoot\..\build",
     [string]$CMakePath = "",
     [string]$InnoCompilerPath = "",
-    [switch]$PerUserInstall,
-    [switch]$SkipVcRedistDownload,
-    [switch]$ExcludeVcRedistBundle
+    [switch]$PerUserInstall
 )
 
 function Resolve-CMakeExecutable {
@@ -133,12 +131,6 @@ if (-not [string]::IsNullOrWhiteSpace($InnoCompilerPath)) {
 }
 if ($PerUserInstall.IsPresent) {
     $installerParams.PerUserInstall = $true
-}
-if ($SkipVcRedistDownload.IsPresent) {
-    $installerParams.SkipVcRedistDownload = $true
-}
-if ($ExcludeVcRedistBundle.IsPresent) {
-    $installerParams.ExcludeVcRedistBundle = $true
 }
 
 & $installerBuilderPath @installerParams

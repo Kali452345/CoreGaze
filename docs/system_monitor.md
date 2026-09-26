@@ -22,6 +22,7 @@ The monitor supports runtime control from tray settings:
 - `SetNetworkSecondaryEnabled(...)`, `SetNetworkSecondaryIfIndex(...)`: optional secondary adapter.
 - `SetTemperaturesEnabled(...)`: CPU/GPU/disk temperature polling on or off.
 - `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
+- `SetProcessGpuTrackingEnabled(...)`: per-process GPU load for the process window, read through `GetProcessGpuUsage(...)`. It keeps the GPU engine query running even when the GPU metric is off. Turning it off frees its buffers. See `docs/process_monitor.md`.
 
 ## CPU and RAM Collection
 - CPU utilization: `\Processor(_Total)\% Processor Time` via PDH, which is what Task Manager shows since KB5064081 (Windows 11 24H2/25H2).

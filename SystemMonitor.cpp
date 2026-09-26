@@ -125,6 +125,27 @@ static bool IsIntervalDue(ULONGLONG lastTick, ULONGLONG now, ULONGLONG intervalM
     return lastTick == 0 || (now - lastTick) >= intervalMs;
 }
 
+enum GpuEngineType {
+    GPU_ENGINE_3D = 0,
+    GPU_ENGINE_COMPUTE,
+    GPU_ENGINE_COPY,
+    GPU_ENGINE_DECODE,
+    GPU_ENGINE_ENCODE,
+    GPU_ENGINE_PROCESSING,
+    GPU_ENGINE_GDI,
+    GPU_ENGINE_COUNT
+};
+
+static const char* const kGpuEngineLabels[GPU_ENGINE_COUNT] = {
+    "3D",
+    "Compute",
+    "Copy",
+    "Decode",
+    "Encode",
+    "Process",
+    "GDI"
+};
+
 static DWORD ClampPollingIntervalMs(DWORD pollingIntervalMs) {
     if (pollingIntervalMs < 500) {
         return 500;
@@ -290,6 +311,12 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_pdhDiskBufferSize(0),
       m_pdhGpuBuffer(NULL),
       m_pdhGpuBufferSize(0),
+      m_processGpuTracking(false),
+      m_processGpuSamples(NULL),
+      m_processGpuSampleCapacity(0),
+      m_processGpuUsage(NULL),
+      m_processGpuUsageCapacity(0),
+      m_processGpuUsageCount(0),
       m_pdhThermalQuery(NULL),
       m_pdhThermalCounter(NULL),
       m_pdhThermalHighPrecision(false),
@@ -447,6 +474,29 @@ SystemMonitor::~SystemMonitor() {
         m_pdhGpuBuffer = NULL;
         m_pdhGpuBufferSize = 0;
     }
+
+    SetProcessGpuTrackingEnabled(false);
+}
+
+void SystemMonitor::SetProcessGpuTrackingEnabled(bool enabled) {
+    m_processGpuTracking = enabled;
+    if (!enabled) {
+        // Only the process window needs these; give the memory back when it closes.
+        free(m_processGpuSamples);
+        free(m_processGpuUsage);
+        m_processGpuSamples = NULL;
+        m_processGpuUsage = NULL;
+        m_processGpuSampleCapacity = 0;
+        m_processGpuUsageCapacity = 0;
+        m_processGpuUsageCount = 0;
+    }
+}
+
+UINT SystemMonitor::GetProcessGpuUsage(const ProcessGpuUsage** outEntries) const {
+    if (outEntries != NULL) {
+        *outEntries = m_processGpuUsage;
+    }
+    return m_processGpuUsageCount;
 }
 
 void SystemMonitor::SetPollingIntervalMs(DWORD pollingIntervalMs) {
@@ -790,6 +840,7 @@ void SystemMonitor::PollMetrics() {
     const bool pollCpu = (m_enabledMetricsMask & SYSTEM_METRIC_CPU) != 0;
     const bool pollRam = (m_enabledMetricsMask & SYSTEM_METRIC_RAM) != 0;
     const bool pollGpu = (m_enabledMetricsMask & SYSTEM_METRIC_GPU) != 0;
+    const bool pollGpuEngines = pollGpu || m_processGpuTracking;
     const bool pollDisk = ((m_enabledMetricsMask & SYSTEM_METRIC_DISK) != 0) && (m_diskSelectionMask != 0);
     const bool pollNetwork = (m_enabledMetricsMask & SYSTEM_METRIC_NETWORK) != 0;
 
@@ -838,7 +889,7 @@ void SystemMonitor::PollMetrics() {
         m_ramUsagePercent = 0.0f;
     }
 
-    const bool needsPdh = pollCpu || pollDisk || pollGpu;
+    const bool needsPdh = pollCpu || pollDisk || pollGpuEngines;
     if (pollDisk) {
         const DWORD currentDriveMask = GetLogicalDrives();
         const bool topologyRefreshRequested = m_diskTopologyRefreshRequested.exchange(false, std::memory_order_relaxed);
@@ -974,7 +1025,7 @@ void SystemMonitor::PollMetrics() {
         ClearGpuTemperatures();
     }
 
-    if (pollGpu) {
+    if (pollGpuEngines) {
         PollGpuMetrics();
     } else {
         for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
@@ -1265,6 +1316,7 @@ void SystemMonitor::SyncLegacyGpuFields() {
 }
 
 void SystemMonitor::PollGpuMetrics() {
+    m_processGpuUsageCount = 0;
     for (UINT i = 0; i < m_gpuAdapterCount; ++i) {
         m_gpuSnapshots[i].usagePercent = 0.0f;
         m_gpuSnapshots[i].dedicatedUsedGB = 0.0f;
@@ -1324,21 +1376,23 @@ void SystemMonitor::PollGpuMetrics() {
         return;
     }
 
-    enum {
-        GPU_ENGINE_3D = 0,
-        GPU_ENGINE_COMPUTE,
-        GPU_ENGINE_COPY,
-        GPU_ENGINE_DECODE,
-        GPU_ENGINE_ENCODE,
-        GPU_ENGINE_PROCESSING,
-        GPU_ENGINE_GDI,
-        GPU_ENGINE_COUNT
-    };
-
     float engineTotals[kMaxGpuAdapters][GPU_ENGINE_COUNT];
     bool engineSeen[kMaxGpuAdapters][GPU_ENGINE_COUNT];
     ZeroMemory(engineTotals, sizeof(engineTotals));
     ZeroMemory(engineSeen, sizeof(engineSeen));
+
+    // Instance names start with "pid_<pid>_", so the same items give per-process load for free.
+    UINT processSampleCount = 0;
+    bool collectProcessSamples = m_processGpuTracking;
+    if (collectProcessSamples && itemCount > m_processGpuSampleCapacity) {
+        ProcessGpuSample* grown = (ProcessGpuSample*)realloc(m_processGpuSamples, itemCount * sizeof(ProcessGpuSample));
+        if (grown != NULL) {
+            m_processGpuSamples = grown;
+            m_processGpuSampleCapacity = itemCount;
+        } else {
+            collectProcessSamples = false;
+        }
+    }
 
     for (DWORD i = 0; i < itemCount; ++i) {
         const char* instanceName = itemArray[i].szName;
@@ -1379,17 +1433,19 @@ void SystemMonitor::PollGpuMetrics() {
 
         engineTotals[gpuIndex][engineType] += (float)rawValue;
         engineSeen[gpuIndex][engineType] = true;
+
+        if (collectProcessSamples && rawValue > 0.0 && strncmp(instanceName, "pid_", 4) == 0) {
+            ProcessGpuSample* sample = &m_processGpuSamples[processSampleCount++];
+            sample->pid = (DWORD)strtoul(instanceName + 4, NULL, 10);
+            sample->adapterIndex = (BYTE)gpuIndex;
+            sample->engineType = (BYTE)engineType;
+            sample->value = (float)rawValue;
+        }
     }
 
-    const char* engineLabels[GPU_ENGINE_COUNT] = {
-        "3D",
-        "Compute",
-        "Copy",
-        "Decode",
-        "Encode",
-        "Process",
-        "GDI"
-    };
+    if (collectProcessSamples) {
+        BuildProcessGpuUsage(processSampleCount);
+    }
 
     for (UINT gpuIndex = 0; gpuIndex < m_gpuAdapterCount; ++gpuIndex) {
         float maxEngineValue = -1.0f;
@@ -1406,7 +1462,7 @@ void SystemMonitor::PollGpuMetrics() {
 
             if (engineTotals[gpuIndex][engineIndex] > maxEngineValue) {
                 maxEngineValue = engineTotals[gpuIndex][engineIndex];
-                maxEngineLabel = engineLabels[engineIndex];
+                maxEngineLabel = kGpuEngineLabels[engineIndex];
             }
         }
 
@@ -1418,6 +1474,70 @@ void SystemMonitor::PollGpuMetrics() {
     }
 
     SyncLegacyGpuFields();
+}
+
+const char* SystemMonitor::GetGpuEngineLabel(UINT engineType) {
+    return (engineType < GPU_ENGINE_COUNT) ? kGpuEngineLabels[engineType] : "N/A";
+}
+
+int SystemMonitor::CompareProcessGpuSamples(const void* left, const void* right) {
+    const ProcessGpuSample* a = (const ProcessGpuSample*)left;
+    const ProcessGpuSample* b = (const ProcessGpuSample*)right;
+    if (a->pid != b->pid) {
+        return (a->pid < b->pid) ? -1 : 1;
+    }
+    const int keyA = (a->adapterIndex << 8) | a->engineType;
+    const int keyB = (b->adapterIndex << 8) | b->engineType;
+    return keyA - keyB;
+}
+
+void SystemMonitor::BuildProcessGpuUsage(UINT sampleCount) {
+    m_processGpuUsageCount = 0;
+    if (sampleCount == 0) {
+        return;
+    }
+
+    // At most one result per sample, so sizing to the sample count is always enough.
+    if (sampleCount > m_processGpuUsageCapacity) {
+        ProcessGpuUsage* grown = (ProcessGpuUsage*)realloc(m_processGpuUsage, sampleCount * sizeof(ProcessGpuUsage));
+        if (grown == NULL) {
+            return;
+        }
+        m_processGpuUsage = grown;
+        m_processGpuUsageCapacity = sampleCount;
+    }
+
+    qsort(m_processGpuSamples, sampleCount, sizeof(ProcessGpuSample), CompareProcessGpuSamples);
+
+    // Sum engine instances per (pid, adapter, engine type), then keep each pid's busiest engine.
+    UINT i = 0;
+    while (i < sampleCount) {
+        const DWORD pid = m_processGpuSamples[i].pid;
+        ProcessGpuUsage* usage = &m_processGpuUsage[m_processGpuUsageCount++];
+        usage->pid = pid;
+        usage->percent = 0.0f;
+        usage->adapterIndex = m_processGpuSamples[i].adapterIndex;
+        usage->engineType = m_processGpuSamples[i].engineType;
+
+        while (i < sampleCount && m_processGpuSamples[i].pid == pid) {
+            const BYTE adapterIndex = m_processGpuSamples[i].adapterIndex;
+            const BYTE engineType = m_processGpuSamples[i].engineType;
+            float engineSum = 0.0f;
+            while (i < sampleCount && m_processGpuSamples[i].pid == pid &&
+                   m_processGpuSamples[i].adapterIndex == adapterIndex && m_processGpuSamples[i].engineType == engineType) {
+                engineSum += m_processGpuSamples[i].value;
+                ++i;
+            }
+            if (engineSum > 100.0f) {
+                engineSum = 100.0f;
+            }
+            if (engineSum > usage->percent) {
+                usage->percent = engineSum;
+                usage->adapterIndex = adapterIndex;
+                usage->engineType = engineType;
+            }
+        }
+    }
 }
 
 void SystemMonitor::ClearDiskCounterHandles() {

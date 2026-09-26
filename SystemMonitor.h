@@ -67,6 +67,15 @@ struct DiskMetricsSnapshot {
     float temperatureCriticalC;
 };
 
+// Per-process GPU load from the GPU Engine counters, as Task Manager computes it: engine instances
+// are summed per (adapter, engine type) and the busiest one is the process's GPU value.
+struct ProcessGpuUsage {
+    DWORD pid;
+    float percent;
+    BYTE adapterIndex;
+    BYTE engineType; // index for SystemMonitor::GetGpuEngineLabel
+};
+
 struct NetworkMetricsSnapshot {
     ULONG ifIndex;
     char displayName[192];
@@ -115,6 +124,13 @@ public:
     const char* GetGPUAdapterNameByIndex(UINT index) const;
     UINT GetDisplayedGPUCount() const;
     bool GetDisplayedGPUSnapshot(UINT rowIndex, GPUMetricsSnapshot* outSnapshot) const;
+
+    // While enabled (the process window is open), GPU Engine counters are polled even when the HUD's
+    // GPU row is hidden, and per-process results are kept. Entries are sorted by pid and stay valid
+    // until the next poll.
+    void SetProcessGpuTrackingEnabled(bool enabled);
+    UINT GetProcessGpuUsage(const ProcessGpuUsage** outEntries) const;
+    static const char* GetGpuEngineLabel(UINT engineType);
 
     UINT GetSelectedDiskMetricCount() const;
     bool GetSelectedDiskMetric(UINT rowIndex, DiskMetricsSnapshot* outSnapshot) const;
@@ -291,6 +307,21 @@ private:
     DWORD m_pdhDiskBufferSize;
     BYTE* m_pdhGpuBuffer;
     DWORD m_pdhGpuBufferSize;
+
+    struct ProcessGpuSample {
+        DWORD pid;
+        BYTE adapterIndex;
+        BYTE engineType;
+        float value;
+    };
+    bool m_processGpuTracking;
+    ProcessGpuSample* m_processGpuSamples; // grow-only scratch, one entry per engine instance
+    UINT m_processGpuSampleCapacity;
+    ProcessGpuUsage* m_processGpuUsage;    // grow-only result, one entry per pid
+    UINT m_processGpuUsageCapacity;
+    UINT m_processGpuUsageCount;
+    void BuildProcessGpuUsage(UINT sampleCount);
+    static int CompareProcessGpuSamples(const void* left, const void* right);
 
     // Thermal zones live in their own query so they can be sampled on a slower cadence.
     PDH_HQUERY m_pdhThermalQuery;

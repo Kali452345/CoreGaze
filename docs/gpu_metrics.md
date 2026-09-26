@@ -13,6 +13,9 @@ GPU telemetry now supports multi-adapter collection and four display modes while
 - per-engine grouping (`3D`, `Compute`, `Copy`, `Decode`, `Encode`, `VideoProcessing`, `GDI Render`)
 - busiest engine becomes adapter utilization label/value
 
+## Per-Process GPU
+Engine instance names start with `pid_<pid>_`. `SetProcessGpuTrackingEnabled(true)` is on only while the process window is open. During that time, the same engine poll also builds a per-process list: it sums the values per (pid, adapter, engine type) and keeps each process's busiest engine, as Task Manager does. The engine query then runs even when the HUD's GPU row is hidden. See `docs/process_monitor.md`.
+
 ## Adapter Model
 At startup, monitor enumerates up to 8 DXGI adapters and caches:
 - adapter name

@@ -654,3 +654,35 @@
 
 **Immediate Next Steps:**
 - Process manager, Phase 1: `ProcessMonitor` collector (NtQuerySystemInformation snapshot, per-process CPU/memory/I-O/GPU deltas) with a cost benchmark.
+
+## 2026-09-26: Process Manager Phase 1 - ProcessMonitor Collector
+
+**Summary of Work Done:**
+- New `ProcessMonitor` (`ProcessMonitor.h/.cpp`, added to CMake):
+  - It gets per-process CPU %, private working set, working set, commit, I/O bytes/s, threads and handles from one `NtQuerySystemInformation(SystemProcessInformation)` call per sample. It opens no per-process handles and needs no admin rights.
+  - CPU uses Task Manager's formula: Δ(user+kernel) / (Δelapsed × logical processors).
+  - Each row is matched to the previous sample by pid plus creation time.
+  - Buffers are grow-only and double-buffered, and a pid hash index is built once per sample.
+- `SystemMonitor` gained per-process GPU tracking:
+  - It reuses the existing `GPU Engine(*)` poll by parsing the `pid_<pid>_` instance prefix, and keeps each process's busiest engine.
+  - New API: `SetProcessGpuTrackingEnabled`, `GetProcessGpuUsage`, `GetGpuEngineLabel`.
+  - The engine labels moved to file scope.
+- New doc `docs/process_monitor.md`; updated `gpu_metrics.md` and `system_monitor.md`.
+
+**Current State:**
+- Nothing in the app uses the collector yet.
+- Verified with scratch harnesses:
+  - Per-row CPU sums to the total.
+  - The total matches PDH `% Processor Time` within about 0.5 points.
+  - The top CPU, memory and GPU processes are plausible (Edge, dwm, Memory Compression).
+- Cost:
+  - `Sample()` takes about 7-8 ms CPU at 20-50% machine load. Nearly all of it is kernel time in the query itself, which is about 0.1% of the machine at a 1 s refresh.
+  - GPU tracking adds about 1.2 ms per poll.
+  - The collector uses about 2.5 MB of private memory.
+- A first version divided by the sum of all process times. It read 1-2 points low because DPC and interrupt time belongs to no process, so it was replaced.
+
+**Immediate Next Steps:**
+- Phase 2: an on-demand process window.
+  - A Dear ImGui table with sortable columns and a name/PID filter.
+  - Redraws only on data ticks or input.
+  - Opens from the tray and a hotkey; calls `Release()` on close.

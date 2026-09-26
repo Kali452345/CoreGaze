@@ -39,6 +39,7 @@ FetchContent_MakeAvailable(imgui)
 set(SOURCES
     main.cpp
     SystemMonitor.cpp
+    ProcessMonitor.cpp
     resource.rc
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp

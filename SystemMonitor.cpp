@@ -28,6 +28,9 @@ static const ULONGLONG kNetworkIdentityEventDebounceMs = 500;
 static const ULONGLONG kCpuTemperaturePollMs = 2000;
 static const ULONGLONG kGpuTemperaturePollMs = 2000;
 static const ULONGLONG kDiskTemperaturePollMs = 10000;
+// Free space rarely changes and GetDiskFreeSpaceExW can touch removable/USB media, so it is
+// refreshed on its own slow cadence (and immediately on every disk topology rebuild).
+static const ULONGLONG kDiskCapacityPollMs = 30000;
 static const float kMinValidTemperatureC = 1.0f;
 static const float kMaxValidCpuTemperatureC = 125.0f;
 static const float kMaxValidGpuTemperatureC = 150.0f;
@@ -259,6 +262,7 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_lastCpuTemperaturePoll(0),
       m_lastGpuTemperaturePoll(0),
       m_lastDiskTemperaturePoll(0),
+      m_lastDiskCapacityPoll(0),
       m_cpuUsage(0.0f),
       m_cpuGHz(0.0f),
       m_cpuTemperatureAvailable(false),
@@ -864,6 +868,12 @@ void SystemMonitor::PollMetrics() {
 
         if (pollDisk) {
             m_diskUsage = 0.0f;
+            const ULONGLONG capacityNow = GetTickCount64();
+            const bool refreshCapacity = IsIntervalDue(m_lastDiskCapacityPoll, capacityNow, kDiskCapacityPollMs);
+            if (refreshCapacity) {
+                m_lastDiskCapacityPoll = capacityNow;
+            }
+
             for (UINT i = 0; i < kMaxDriveLetters; ++i) {
                 if (!m_driveCounters[i].selected) {
                     continue;
@@ -897,13 +907,15 @@ void SystemMonitor::PollMetrics() {
                     }
                 }
 
-                wchar_t rootPath[4] = { (wchar_t)(L'A' + i), L':', L'\\', L'\0' };
-                ULARGE_INTEGER freeBytesAvail = {}, totalBytes = {}, totalFreeBytes = {};
-                if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &totalFreeBytes) && totalBytes.QuadPart > 0) {
-                    m_driveCounters[i].totalGB = (float)((double)totalBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
-                    m_driveCounters[i].freeGB = (float)((double)totalFreeBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
-                    m_driveCounters[i].usedGB = m_driveCounters[i].totalGB - m_driveCounters[i].freeGB;
-                    m_driveCounters[i].capacityAvailable = true;
+                if (refreshCapacity) {
+                    wchar_t rootPath[4] = { (wchar_t)(L'A' + i), L':', L'\\', L'\0' };
+                    ULARGE_INTEGER freeBytesAvail = {}, totalBytes = {}, totalFreeBytes = {};
+                    if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &totalFreeBytes) && totalBytes.QuadPart > 0) {
+                        m_driveCounters[i].totalGB = (float)((double)totalBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
+                        m_driveCounters[i].freeGB = (float)((double)totalFreeBytes.QuadPart / (1024.0 * 1024.0 * 1024.0));
+                        m_driveCounters[i].usedGB = m_driveCounters[i].totalGB - m_driveCounters[i].freeGB;
+                        m_driveCounters[i].capacityAvailable = true;
+                    }
                 }
 
                 if (m_driveCounters[i].activePercent > m_diskUsage) {
@@ -1682,7 +1694,9 @@ void SystemMonitor::RebuildDiskCounters() {
     }
 
     // New topology: read temperatures on the next poll instead of waiting out the interval.
+    // Capacity was just read above for every selected drive, so its timer restarts now.
     m_lastDiskTemperaturePoll = 0;
+    m_lastDiskCapacityPoll = GetTickCount64();
 
     if (m_pdhQuery != NULL) {
         PdhCollectQueryData(m_pdhQuery);

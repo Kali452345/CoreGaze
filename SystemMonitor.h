@@ -241,6 +241,7 @@ private:
     ULONGLONG m_lastCpuTemperaturePoll;
     ULONGLONG m_lastGpuTemperaturePoll;
     ULONGLONG m_lastDiskTemperaturePoll;
+    ULONGLONG m_lastDiskCapacityPoll;
 
     // Cache metrics
     char m_cpuName[64];

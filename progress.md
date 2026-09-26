@@ -560,3 +560,11 @@
 
 **Immediate Next Steps:**
 - Existing build directories re-fetch ImGui on the next configure (the `GIT_TAG` change triggers it).
+
+## 2026-09-26: Disk Free-Space Cadence
+
+**Summary of Work Done:**
+- `GetDiskFreeSpaceExW` ran for every selected drive on every poll (up to twice a second). Free space is now refreshed every 30s (`kDiskCapacityPollMs`), and immediately whenever the disk topology is rebuilt (drive added/removed, selection changed). Active %, read and write rates still update every poll.
+
+**Current State:**
+- Builds clean. The used/free label can lag real changes by up to 30s.

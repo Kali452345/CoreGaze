@@ -547,3 +547,16 @@
 
 **Immediate Next Steps:**
 - Review items still open: DPI awareness, pin ImGui and drop `imgui_demo.cpp`, Task Manager-matching CPU/disk counters, HUD-sized window, less frequent free-space queries, single version source, stale docs.
+
+## 2026-09-26: Pin Dear ImGui
+
+**Summary of Work Done:**
+- `CMakeLists.txt` fetched ImGui from `master`, so every fresh configure could pull a different, possibly breaking, version. The local `build/` and a scratch build had already drifted apart (v1.92.9b+22 vs. a 2026-09-25 master). It is now pinned to the v1.92.9b release commit (`f1cc2ae1`).
+- Dropped `imgui_demo.cpp` from the sources (nothing calls the demo window). The executable is ~316 KB smaller.
+- README notes the pin and how to upgrade it.
+
+**Current State:**
+- A clean configure and build against the pinned version succeeds with no new warnings.
+
+**Immediate Next Steps:**
+- Existing build directories re-fetch ImGui on the next configure (the `GIT_TAG` change triggers it).

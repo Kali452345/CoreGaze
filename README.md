@@ -18,6 +18,8 @@ CoreGaze is a lightweight Windows resource-monitor overlay built with C++, Win32
 
 MinGW builds link the C++ runtime statically, so end users do not need the Visual C++ Redistributable.
 
+Dear ImGui is fetched by CMake at configure time, pinned to a release commit (currently v1.92.9b) in `CMakeLists.txt`. To upgrade it, replace the hash with a newer release tag's commit, rebuild, and check the HUD.
+
 ## Build (Local)
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release

@@ -15,12 +15,13 @@ set(COREGAZE_SIGN_CERT_PATH "" CACHE FILEPATH "Path to PFX certificate for signi
 set(COREGAZE_SIGN_CERT_PASSWORD "" CACHE STRING "Password for PFX certificate")
 set(COREGAZE_SIGN_TIMESTAMP_URL "http://timestamp.digicert.com" CACHE STRING "RFC3161 timestamp server URL")
 
-# Fetch Dear ImGui
+# Fetch Dear ImGui, pinned to a release commit so upstream changes can't break the build.
+# To upgrade: pick a new release tag, replace the hash, rebuild, and check the HUD.
 include(FetchContent)
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        master
+    GIT_TAG        f1cc2ae15e53a861a874c3034aae6798fde194ab # v1.92.9b
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -30,7 +31,6 @@ set(SOURCES
     SystemMonitor.cpp
     resource.rc
     ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp

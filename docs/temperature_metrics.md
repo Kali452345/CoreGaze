@@ -33,7 +33,7 @@ Temperatures are sampled on their own timers inside `SystemMonitor::PollMetrics`
 - Thresholds use the drive's own `WarningTemperature` / `CriticalTemperature` (NVMe WCTEMP/CCTEMP) when valid; otherwise `70 °C` / `80 °C`.
 
 ## HUD
-- The temperature is drawn on the title line, right-aligned to the bar edge (`DrawTitleTemperature` in `main.cpp`). If the title is wider than the bar, the temperature follows it and the auto-sized window grows.
+- The temperature is drawn on the title line, right-aligned to the bar edge (`DrawMetricTitle` in `main.cpp`). A title too long to fit beside it (for example the full CPU brand string) is shortened with `...` (`FitTextToWidth`, cut on UTF-8 boundaries), so every temperature lines up and the HUD never widens. With temperatures off, titles are drawn in full.
 - Colors: grey below the warning threshold, orange (`1.0, 0.55, 0.0`) at warning, red (`1.0, 0.15, 0.15`) at critical. These match the utilization threshold colors in `ui_thresholds.md`.
 - CPU thresholds are fixed at `85 °C` warning and `95 °C` critical, because thermal zones don't report limits.
 - Values are rounded to whole degrees and shown as °C or °F.

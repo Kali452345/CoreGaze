@@ -536,3 +536,14 @@
 **Immediate Next Steps:**
 - Visually check the HUD labels and °F toggle; test on a machine with a dedicated GPU.
 - Remaining review follow-ups: DPI awareness manifest, pin ImGui version, single source of truth for the app version, HUD-sized host window, Task Manager-matching CPU counter, less frequent free-space queries, stale signing workflow template.
+
+## 2026-09-26: Temperature Label Fit
+
+**Summary of Work Done:**
+- Long metric titles (the full CPU brand string, long GPU names) pushed the temperature past the bar edge and widened the HUD. `DrawMetricTitle` now shortens the title with `...` so it fits beside the temperature, and every temperature is right-aligned to the bar edge.
+
+**Current State:**
+- Verified visually on the running build: `CPU: Intel(R) Core(TM) i5-8350U CPU @... 77°C` and `Disk C: ... 41°C` line up and the window matches the bar width.
+
+**Immediate Next Steps:**
+- Review items still open: DPI awareness, pin ImGui and drop `imgui_demo.cpp`, Task Manager-matching CPU/disk counters, HUD-sized window, less frequent free-space queries, single version source, stale docs.

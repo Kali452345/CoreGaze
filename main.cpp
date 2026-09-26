@@ -176,7 +176,7 @@ static void RemoveLegacyExecutableIfPresent();
 static void FormatNetworkRateMbps(float mbps, char* output, int outputSize);
 static void FormatDiskRateKBps(float kbps, char* output, int outputSize);
 static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImVec4& baseColor);
-static void DrawTitleTemperature(float temperatureC, float warningC, float criticalC, float rowWidth);
+static void DrawMetricTitle(const char* title, bool showTemperature, float temperatureC, float warningC, float criticalC, float rowWidth);
 static void ResetNetworkBarScaleState(NetworkBarScaleState* state, ULONG ifIndex);
 static float ComputeAdaptiveNetworkProgress(float mbps, float* ceilingMbps, int* highSamples);
 
@@ -439,10 +439,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             snprintf(cpuBuf, sizeof(cpuBuf), "%.1f%% @ %.2f GHz", sysMonitor.GetCPUUsage(), sysMonitor.GetCPUGHz());
             const float cpuProgress = sysMonitor.GetCPUUsage() / 100.0f;
             const ImVec4 cpuBaseColor(0.2f, 0.6f, 1.0f, 1.0f);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", cpuTitle);
-            if (g_appSettings.showTemperatures && sysMonitor.IsCPUTemperatureAvailable()) {
-                DrawTitleTemperature(sysMonitor.GetCPUTemperatureC(), kCpuTemperatureWarningC, kCpuTemperatureCriticalC, barWidth);
-            }
+            DrawMetricTitle(cpuTitle,
+                g_appSettings.showTemperatures && sysMonitor.IsCPUTemperatureAvailable(),
+                sysMonitor.GetCPUTemperatureC(), kCpuTemperatureWarningC, kCpuTemperatureCriticalC, barWidth);
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(cpuProgress, cpuBaseColor));
             ImGui::ProgressBar(cpuProgress, ImVec2(barWidth, barHeight), cpuBuf);
             ImGui::PopStyleColor();
@@ -521,10 +520,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     if (diskProgress < 0.0f) diskProgress = 0.0f;
                     if (diskProgress > 1.0f) diskProgress = 1.0f;
 
-                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", diskTitle);
-                    if (g_appSettings.showTemperatures && diskSnapshot.temperatureAvailable) {
-                        DrawTitleTemperature(diskSnapshot.temperatureC, diskSnapshot.temperatureWarningC, diskSnapshot.temperatureCriticalC, barWidth);
-                    }
+                    DrawMetricTitle(diskTitle,
+                        g_appSettings.showTemperatures && diskSnapshot.temperatureAvailable,
+                        diskSnapshot.temperatureC, diskSnapshot.temperatureWarningC, diskSnapshot.temperatureCriticalC, barWidth);
                     const ImVec4 diskBaseColor(1.0f, 0.6f, 0.1f, 1.0f);
                     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(diskProgress, diskBaseColor));
                     ImGui::ProgressBar(diskProgress, ImVec2(barWidth, barHeight), diskBuf);
@@ -639,10 +637,11 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                         snprintf(gpuTitle, sizeof(gpuTitle), "GPU");
                     }
 
-                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s: %s", gpuTitle, gpuSnapshot.adapterName);
-                    if (g_appSettings.showTemperatures && gpuSnapshot.temperatureAvailable) {
-                        DrawTitleTemperature(gpuSnapshot.temperatureC, gpuSnapshot.temperatureWarningC, gpuSnapshot.temperatureCriticalC, barWidth);
-                    }
+                    char gpuRowTitle[192];
+                    snprintf(gpuRowTitle, sizeof(gpuRowTitle), "%s: %s", gpuTitle, gpuSnapshot.adapterName);
+                    DrawMetricTitle(gpuRowTitle,
+                        g_appSettings.showTemperatures && gpuSnapshot.temperatureAvailable,
+                        gpuSnapshot.temperatureC, gpuSnapshot.temperatureWarningC, gpuSnapshot.temperatureCriticalC, barWidth);
 
                     // GPU Core Utilization Bar
                     char gpuBuf[64];
@@ -1034,33 +1033,70 @@ static ImVec4 ResolveUtilizationThresholdColor(float progressFraction, const ImV
     return baseColor;
 }
 
-// Draws the temperature on the same line as the metric title, right-aligned to the bar edge.
-// Long titles push it further right instead of overlapping (the window auto-resizes).
-static void DrawTitleTemperature(float temperatureC, float warningC, float criticalC, float rowWidth) {
+// Copies `text` into `output`, shortened with "..." if it is wider than `maxWidth` pixels.
+// Cuts only on UTF-8 character boundaries so adapter names with non-ASCII characters stay valid.
+static void FitTextToWidth(const char* text, float maxWidth, char* output, int outputSize) {
+    snprintf(output, outputSize, "%s", text);
+    if (ImGui::CalcTextSize(output).x <= maxWidth) {
+        return;
+    }
+
+    const char* kEllipsis = "...";
+    const float ellipsisWidth = ImGui::CalcTextSize(kEllipsis).x;
+    int length = (int)strlen(output);
+    while (length > 0) {
+        --length;
+        while (length > 0 && (output[length] & 0xC0) == 0x80) {
+            --length;
+        }
+        if (ImGui::CalcTextSize(output, output + length).x + ellipsisWidth <= maxWidth) {
+            break;
+        }
+    }
+
+    while (length > 0 && output[length - 1] == ' ') {
+        --length;
+    }
+    snprintf(output + length, outputSize - length, "%s", kEllipsis);
+}
+
+// Draws a metric title, optionally with its temperature right-aligned to the bar edge. When a
+// temperature is shown, a title too long to fit beside it is shortened so the HUD never widens.
+static void DrawMetricTitle(const char* title, bool showTemperature, float temperatureC, float warningC, float criticalC, float rowWidth) {
+    const ImVec4 kTitleColor(1.0f, 1.0f, 1.0f, 1.0f);
+    if (!showTemperature) {
+        ImGui::TextColored(kTitleColor, "%s", title);
+        return;
+    }
+
     const ImVec4 kNormalColor(0.75f, 0.75f, 0.75f, 1.0f);
     const ImVec4 kWarningColor(1.0f, 0.55f, 0.0f, 1.0f);
     const ImVec4 kCriticalColor(1.0f, 0.15f, 0.15f, 1.0f);
 
-    ImVec4 color = kNormalColor;
+    ImVec4 temperatureColor = kNormalColor;
     if (criticalC > 0.0f && temperatureC >= criticalC) {
-        color = kCriticalColor;
+        temperatureColor = kCriticalColor;
     } else if (warningC > 0.0f && temperatureC >= warningC) {
-        color = kWarningColor;
+        temperatureColor = kWarningColor;
     }
 
-    char text[24];
+    char temperatureText[24];
     if (g_appSettings.temperatureFahrenheit) {
-        snprintf(text, sizeof(text), "%.0f\xC2\xB0""F", (temperatureC * 9.0f / 5.0f) + 32.0f);
+        snprintf(temperatureText, sizeof(temperatureText), "%.0f\xC2\xB0""F", (temperatureC * 9.0f / 5.0f) + 32.0f);
     } else {
-        snprintf(text, sizeof(text), "%.0f\xC2\xB0""C", temperatureC);
+        snprintf(temperatureText, sizeof(temperatureText), "%.0f\xC2\xB0""C", temperatureC);
     }
+
+    const float temperatureWidth = ImGui::CalcTextSize(temperatureText).x;
+    const float maxTitleWidth = rowWidth - temperatureWidth - ImGui::GetStyle().ItemSpacing.x;
+
+    char fittedTitle[192];
+    FitTextToWidth(title, maxTitleWidth, fittedTitle, (int)sizeof(fittedTitle));
+    ImGui::TextColored(kTitleColor, "%s", fittedTitle);
 
     ImGui::SameLine();
-    const float alignedX = ImGui::GetCursorStartPos().x + rowWidth - ImGui::CalcTextSize(text).x;
-    if (ImGui::GetCursorPosX() < alignedX) {
-        ImGui::SetCursorPosX(alignedX);
-    }
-    ImGui::TextColored(color, "%s", text);
+    ImGui::SetCursorPosX(ImGui::GetCursorStartPos().x + rowWidth - temperatureWidth);
+    ImGui::TextColored(temperatureColor, "%s", temperatureText);
 }
 
 static void ResetNetworkBarScaleState(NetworkBarScaleState* state, ULONG ifIndex) {

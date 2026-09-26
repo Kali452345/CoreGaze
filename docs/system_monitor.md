@@ -24,7 +24,7 @@ The monitor supports runtime control from tray settings:
 - `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
 
 ## CPU and RAM Collection
-- CPU utilization: `\Processor(_Total)\% Processor Time` via PDH.
+- CPU utilization: `\Processor Information(_Total)\% Processor Utility` via PDH (what Task Manager shows), falling back to `\Processor(_Total)\% Processor Time`.
 - CPU GHz: registry base MHz + PDH `\Processor Information(_Total)\% Processor Performance`.
 - RAM: `GlobalMemoryStatusEx`.
 
@@ -52,10 +52,10 @@ Mode selection is resolved in monitor helpers:
 
 ## Targeted Per-Drive Polling
 Disk telemetry is now selected-drive aware:
-- Each selected fixed drive gets dedicated PDH counters for:
-  - `% Disk Time`
-  - `Disk Reads/sec`
-  - `Disk Writes/sec`
+- Each selected fixed drive gets dedicated PDH counters (`LogicalDisk(X:)` first, `PhysicalDisk` fallback) for:
+  - `% Idle Time` (active time = `100 - idle`, as in Task Manager)
+  - `Disk Read Bytes/sec`
+  - `Disk Write Bytes/sec`
 - Unselected drives have no active counter handles and incur no polling cost.
 
 ## Drive Mapping Strategy

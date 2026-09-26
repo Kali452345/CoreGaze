@@ -522,7 +522,7 @@
 **Summary of Work Done:**
 - **CPU temperature**: hottest ACPI thermal zone from PDH `\Thermal Zone Information(*)\High Precision Temperature` (falls back to `\Temperature`), in a dedicated PDH query sampled every 2s.
 - **GPU temperature**: `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` per adapter LUID (the same source Task Manager uses). D3DKMT types are declared locally because MinGW has no `d3dkmthk.h`, and the entry points are resolved from `gdi32.dll`. Warning/critical thresholds come from `ADAPTERPERFDATA_CAPS` when reported. Aggregate mode shows the hottest adapter.
-- **Disk temperature**: `IOCTL_STORAGE_QUERY_PROPERTY` / `StorageDeviceTemperatureProperty` on `\.\PhysicalDriveN`, every 10s, with the drive's own WCTEMP/CCTEMP thresholds. Handles are opened per read (never block safe removal), spinning HDDs are skipped (no spin-up), and drives that never answer are not retried until the next topology rebuild.
+- **Disk temperature**: `IOCTL_STORAGE_QUERY_PROPERTY` / `StorageDeviceTemperatureProperty` on `\\.\PhysicalDriveN`, every 10s, with the drive's own WCTEMP/CCTEMP thresholds. Handles are opened per read (never block safe removal), spinning HDDs are skipped (no spin-up), and drives that never answer are not retried until the next topology rebuild.
 - **Physical disk mapping fix**: drive-letter-to-disk mapping now uses `IOCTL_STORAGE_GET_DEVICE_NUMBER`; the old `QueryDosDevice` parse always failed for `HarddiskVolumeN` targets.
 - **HUD**: right-aligned temperature on the CPU, disk and GPU title lines, grey/orange/red by threshold (CPU fixed 85/95 °C).
 - **Tray**: new `Temperatures` submenu (Show Temperatures, Celsius/Fahrenheit), persisted as `[Temperature] Show` / `Fahrenheit`.
@@ -568,3 +568,15 @@
 
 **Current State:**
 - Builds clean. The used/free label can lag real changes by up to 30s.
+
+## 2026-09-26: Task Manager-Matching CPU and Disk Counters
+
+**Summary of Work Done:**
+- **CPU %** now reads `\Processor Information(_Total)\% Processor Utility`, the counter Task Manager uses. It scales busy time by the actual clock, so a laptop idling below base clock no longer reports inflated usage (and turbo is accounted for). Falls back to `% Processor Time` where the counter is missing.
+- **Disk active %** is now `100 - % Idle Time` (Task Manager's definition) instead of `% Disk Time`, which is a queue-length estimate that routinely goes past 100% on SSDs. The drive counter handle was renamed `activeCounter` to `idleCounter`.
+
+**Current State:**
+- A harness sampled side by side with `Get-Counter` matched: CPU 22-33% vs. 22-32%, C: active 0.1-0.7% vs. 0.2-1.1% (same-second samples, so small offsets are expected).
+
+**Immediate Next Steps:**
+- Single version source, stale docs, DPI awareness, HUD-sized window.

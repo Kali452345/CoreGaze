@@ -331,7 +331,7 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
         m_driveCounters[i].physicalDiskIndex = -1;
         m_driveCounters[i].fallbackTotal = false;
         m_driveCounters[i].pdhInstance[0] = L'\0';
-        m_driveCounters[i].activeCounter = NULL;
+        m_driveCounters[i].idleCounter = NULL;
         m_driveCounters[i].readCounter = NULL;
         m_driveCounters[i].writeCounter = NULL;
         m_driveCounters[i].activePercent = 0.0f;
@@ -379,7 +379,11 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
     }
 
     if (PdhOpenQueryA(NULL, 0, &m_pdhQuery) == ERROR_SUCCESS) {
-        PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor(_Total)\\% Processor Time", 0, &m_pdhCpuCounter);
+        // % Processor Utility is what Task Manager shows: busy time scaled by the actual clock, so it
+        // accounts for turbo and power-saving frequencies. Older systems fall back to plain busy time.
+        if (PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor Information(_Total)\\% Processor Utility", 0, &m_pdhCpuCounter) != ERROR_SUCCESS) {
+            PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor(_Total)\\% Processor Time", 0, &m_pdhCpuCounter);
+        }
         PdhAddEnglishCounterW(m_pdhQuery, L"\\Processor Information(_Total)\\% Processor Performance", 0, &m_pdhCpuPerfCounter);
         if (PdhAddEnglishCounterW(m_pdhQuery, L"\\PhysicalDisk(*)\\% Disk Time", 0, &m_pdhDiskInstanceCounter) != ERROR_SUCCESS) {
             m_pdhDiskInstanceCounter = NULL;
@@ -883,8 +887,10 @@ void SystemMonitor::PollMetrics() {
                 m_driveCounters[i].readKBps = 0.0f;
                 m_driveCounters[i].writeKBps = 0.0f;
 
-                if (m_driveCounters[i].activeCounter != NULL && PdhGetFormattedCounterValue(m_driveCounters[i].activeCounter, PDH_FMT_DOUBLE, NULL, &counterVal) == ERROR_SUCCESS) {
-                    m_driveCounters[i].activePercent = (float)counterVal.doubleValue;
+                // Active time is 100 - % Idle Time, as in Task Manager. % Disk Time is a queue-length
+                // estimate that routinely exceeds 100% on SSDs.
+                if (m_driveCounters[i].idleCounter != NULL && PdhGetFormattedCounterValue(m_driveCounters[i].idleCounter, PDH_FMT_DOUBLE, NULL, &counterVal) == ERROR_SUCCESS) {
+                    m_driveCounters[i].activePercent = 100.0f - (float)counterVal.doubleValue;
                     if (m_driveCounters[i].activePercent < 0.0f) {
                         m_driveCounters[i].activePercent = 0.0f;
                     }
@@ -1417,9 +1423,9 @@ void SystemMonitor::PollGpuMetrics() {
 
 void SystemMonitor::ClearDiskCounterHandles() {
     for (UINT i = 0; i < kMaxDriveLetters; ++i) {
-        if (m_driveCounters[i].activeCounter != NULL) {
-            PdhRemoveCounter(m_driveCounters[i].activeCounter);
-            m_driveCounters[i].activeCounter = NULL;
+        if (m_driveCounters[i].idleCounter != NULL) {
+            PdhRemoveCounter(m_driveCounters[i].idleCounter);
+            m_driveCounters[i].idleCounter = NULL;
         }
         if (m_driveCounters[i].readCounter != NULL) {
             PdhRemoveCounter(m_driveCounters[i].readCounter);
@@ -1627,9 +1633,9 @@ void SystemMonitor::RebuildDiskCounters() {
         wcscpy_s(slot->pdhInstance, instanceName);
 
         auto removePartialCounters = [&]() {
-            if (slot->activeCounter != NULL) {
-                PdhRemoveCounter(slot->activeCounter);
-                slot->activeCounter = NULL;
+            if (slot->idleCounter != NULL) {
+                PdhRemoveCounter(slot->idleCounter);
+                slot->idleCounter = NULL;
             }
             if (slot->readCounter != NULL) {
                 PdhRemoveCounter(slot->readCounter);
@@ -1642,14 +1648,14 @@ void SystemMonitor::RebuildDiskCounters() {
         };
 
         auto tryAddLogicalCounters = [&](wchar_t dl) -> bool {
-            wchar_t activePath[128] = {};
+            wchar_t idlePath[128] = {};
             wchar_t readPath[128] = {};
             wchar_t writePath[128] = {};
-            swprintf_s(activePath, L"\\LogicalDisk(%c:)\\%% Disk Time", dl);
+            swprintf_s(idlePath, L"\\LogicalDisk(%c:)\\%% Idle Time", dl);
             swprintf_s(readPath, L"\\LogicalDisk(%c:)\\Disk Read Bytes/sec", dl);
             swprintf_s(writePath, L"\\LogicalDisk(%c:)\\Disk Write Bytes/sec", dl);
 
-            if (PdhAddEnglishCounterW(m_pdhQuery, activePath, 0, &slot->activeCounter) == ERROR_SUCCESS &&
+            if (PdhAddEnglishCounterW(m_pdhQuery, idlePath, 0, &slot->idleCounter) == ERROR_SUCCESS &&
                 PdhAddEnglishCounterW(m_pdhQuery, readPath, 0, &slot->readCounter) == ERROR_SUCCESS &&
                 PdhAddEnglishCounterW(m_pdhQuery, writePath, 0, &slot->writeCounter) == ERROR_SUCCESS) {
                 swprintf_s(slot->pdhInstance, L"%c:", dl);
@@ -1661,14 +1667,14 @@ void SystemMonitor::RebuildDiskCounters() {
         };
 
         auto tryAddPhysicalCounters = [&](const wchar_t* pdhInstanceName) -> bool {
-            wchar_t activePath[128] = {};
+            wchar_t idlePath[128] = {};
             wchar_t readPath[128] = {};
             wchar_t writePath[128] = {};
-            swprintf_s(activePath, L"\\PhysicalDisk(%ls)\\%% Disk Time", pdhInstanceName);
+            swprintf_s(idlePath, L"\\PhysicalDisk(%ls)\\%% Idle Time", pdhInstanceName);
             swprintf_s(readPath, L"\\PhysicalDisk(%ls)\\Disk Read Bytes/sec", pdhInstanceName);
             swprintf_s(writePath, L"\\PhysicalDisk(%ls)\\Disk Write Bytes/sec", pdhInstanceName);
 
-            if (PdhAddEnglishCounterW(m_pdhQuery, activePath, 0, &slot->activeCounter) == ERROR_SUCCESS &&
+            if (PdhAddEnglishCounterW(m_pdhQuery, idlePath, 0, &slot->idleCounter) == ERROR_SUCCESS &&
                 PdhAddEnglishCounterW(m_pdhQuery, readPath, 0, &slot->readCounter) == ERROR_SUCCESS &&
                 PdhAddEnglishCounterW(m_pdhQuery, writePath, 0, &slot->writeCounter) == ERROR_SUCCESS) {
                 return true;

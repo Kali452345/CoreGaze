@@ -174,7 +174,7 @@ private:
         int physicalDiskIndex;
         bool fallbackTotal;
         wchar_t pdhInstance[64];
-        PDH_HCOUNTER activeCounter;
+        PDH_HCOUNTER idleCounter;
         PDH_HCOUNTER readCounter;
         PDH_HCOUNTER writeCounter;
         float activePercent;

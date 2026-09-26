@@ -5,19 +5,19 @@ PDH remains the main source for CPU, GPU engine utilization, and disk activity c
 ## PDH Counter Coverage
 
 ## CPU
-- `\Processor(_Total)\% Processor Time`
-- `\Processor Information(_Total)\% Processor Performance`
+- `\Processor Information(_Total)\% Processor Utility`: the utilization Task Manager shows. It scales busy time by the actual clock, so it reflects turbo and power-saving frequencies and can differ noticeably from `% Processor Time`. Falls back to `\Processor(_Total)\% Processor Time` on systems without it (pre-Windows 8).
+- `\Processor Information(_Total)\% Processor Performance`: current clock relative to base, used for the GHz readout.
 
 ## GPU
 - `\GPU Engine(*)\Utilization Percentage`
 - Wildcard instances are parsed and filtered by cached adapter LUID patterns.
 
 ## Disk
-- `\PhysicalDisk(*)\% Disk Time` is used for instance discovery/mapping.
-- For each selected drive, monitor registers dedicated counters against resolved instance:
-  - `\PhysicalDisk(instance)\% Disk Time`
-  - `\PhysicalDisk(instance)\Disk Read Bytes/sec`
-  - `\PhysicalDisk(instance)\Disk Write Bytes/sec`
+- `\PhysicalDisk(*)\% Disk Time` is used only for instance discovery/mapping.
+- For each selected drive, the monitor registers a dedicated counter triplet, preferring the drive's own `LogicalDisk(X:)` instance and falling back to the resolved `PhysicalDisk` instance, then `PhysicalDisk(_Total)`:
+  - `% Idle Time`: active time is shown as `100 - % Idle Time`, matching Task Manager. (`% Disk Time` is a queue-length estimate that routinely exceeds 100% on SSDs.)
+  - `Disk Read Bytes/sec`
+  - `Disk Write Bytes/sec`
 
 ## Selective Registration for Disk
 Disk handles are rebuilt only when disk selection changes.

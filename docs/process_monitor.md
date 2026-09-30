@@ -17,6 +17,7 @@ Rejected alternatives, measured on the development machine (8 logical processors
 | Field | Source | Notes |
 |---|---|---|
 | `cpuPercent` | Δ(user + kernel time) / (Δelapsed × logical processors) | The same formula as Task Manager since KB5064081 |
+| `cpuPowerWatts` | `ApplyCpuPower()` | Estimated process power draw allocated proportionally from total package wattage by CPU share |
 | `privateWorkingSet` | `WorkingSetPrivateSize` | Task Manager's "Memory" column |
 | `workingSet`, `commitBytes` | `WorkingSetSize`, `PrivatePageCount` | Details-page columns |
 | `ioBytesPerSec` | Δ(read + write transfer bytes) / Δelapsed | **All** I/O (files, pipes, devices, network), not disk only. True per-process disk and network figures need an elevated ETW session (`docs/etw_disk_network.md`). |
@@ -29,8 +30,10 @@ Rejected alternatives, measured on the development machine (8 logical processors
 - The image name is converted to UTF-8 once, when the process first appears. After that it is copied from the previous row.
 - The elapsed time is stamped at the middle of the snapshot call, because the kernel reads the process times while it builds the snapshot.
 
-## Why the denominator is elapsed × processors
-Interrupt and DPC time is charged to no process, so the sum of all process times (Idle included) falls short of elapsed time × processors. Dividing by that sum made the total read 1-2 points below PDH `% Processor Time`. With elapsed × processors, the total matches PDH within sampling jitter (for example 31.5 vs 31.5 and 26.5 vs 26.9).
+## CPU Power Allocation
+`ProcessMonitor::ApplyCpuPower(float totalPackageWatts)` computes proportional power draw:
+$$P_{\text{proc}} = P_{\text{package}} \times \frac{\text{CPU}\%_{\text{proc}}}{\text{CPU}\%_{\text{total}}}$$
+The total package wattage is also stored in `ProcessTotals::cpuPackageWatts` to drive the table's Totals row and the status bar.
 
 ## GPU Merge
 `SystemMonitor` already reads `\GPU Engine(*)\Utilization Percentage` for the HUD, and every instance name starts with `pid_<pid>_`. `SetProcessGpuTrackingEnabled(true)` makes `PollGpuMetrics` also do the following:

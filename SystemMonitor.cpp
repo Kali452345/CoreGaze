@@ -26,6 +26,7 @@ static const ULONGLONG kNetworkIdentityEventDebounceMs = 500;
 // Temperatures change slowly, so they are sampled on their own cadence instead of every poll.
 // Disk reads are the slowest so NVMe drives can still reach their low-power states.
 static const ULONGLONG kCpuTemperaturePollMs = 2000;
+static const ULONGLONG kCpuPowerPollMs = 1000;
 static const ULONGLONG kGpuTemperaturePollMs = 2000;
 static const ULONGLONG kDiskTemperaturePollMs = 10000;
 // Free space rarely changes and GetDiskFreeSpaceExW can touch removable/USB media, so it is
@@ -322,6 +323,16 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
       m_pdhThermalHighPrecision(false),
       m_pdhThermalBuffer(NULL),
       m_pdhThermalBufferSize(0),
+      m_pdhPowerQuery(NULL),
+      m_pdhPowerCounter(NULL),
+      m_pdhPowerBuffer(NULL),
+      m_pdhPowerBufferSize(0),
+      m_cpuPowerEnabled(true),
+      m_cpuPowerAvailable(false),
+      m_cpuPackagePowerWatts(0.0f),
+      m_cpuCorePowerWatts(0.0f),
+      m_cpuDramPowerWatts(0.0f),
+      m_lastCpuPowerPoll(0),
       m_diskTemperatureWork(NULL),
       m_diskTemperatureJobBusy(false),
       m_diskTemperatureResultsPending(false)
@@ -428,6 +439,7 @@ SystemMonitor::SystemMonitor(ID3D11Device* d3dDevice)
     }
 
     InitializeThermalZoneQuery();
+    InitializePowerQuery();
 
     RefreshNetworkIdentityNow();
     // Treat startup like a network event: at sign-in NLM often still reports "Identifying...".
@@ -468,10 +480,22 @@ SystemMonitor::~SystemMonitor() {
         m_pdhThermalCounter = NULL;
     }
 
+    if (m_pdhPowerQuery != NULL) {
+        PdhCloseQuery(m_pdhPowerQuery);
+        m_pdhPowerQuery = NULL;
+        m_pdhPowerCounter = NULL;
+    }
+
     if (m_pdhThermalBuffer != NULL) {
         free(m_pdhThermalBuffer);
         m_pdhThermalBuffer = NULL;
         m_pdhThermalBufferSize = 0;
+    }
+
+    if (m_pdhPowerBuffer != NULL) {
+        free(m_pdhPowerBuffer);
+        m_pdhPowerBuffer = NULL;
+        m_pdhPowerBufferSize = 0;
     }
 
     if (m_pdhDiskBuffer != NULL) {
@@ -596,6 +620,19 @@ void SystemMonitor::SetTemperaturesEnabled(bool enabled) {
     ClearGpuTemperatures();
     ClearDiskTemperatures();
     SyncLegacyGpuFields();
+}
+
+void SystemMonitor::SetCpuPowerEnabled(bool enabled) {
+    if (enabled == m_cpuPowerEnabled) {
+        return;
+    }
+
+    m_cpuPowerEnabled = enabled;
+    m_cpuPowerAvailable = false;
+    m_cpuPackagePowerWatts = 0.0f;
+    m_cpuCorePowerWatts = 0.0f;
+    m_cpuDramPowerWatts = 0.0f;
+    m_lastCpuPowerPoll = 0;
 }
 
 void SystemMonitor::RefreshNetworkIdentityNow() {
@@ -994,12 +1031,25 @@ void SystemMonitor::PollMetrics() {
         }
     }
 
-    const ULONGLONG temperatureNow = GetTickCount64();
+    const ULONGLONG cadenceNow = GetTickCount64();
+
+    if (pollCpu && m_cpuPowerEnabled) {
+        if (IsIntervalDue(m_lastCpuPowerPoll, cadenceNow, kCpuPowerPollMs)) {
+            PollCpuPower();
+            m_lastCpuPowerPoll = cadenceNow;
+        }
+    } else {
+        m_cpuPowerAvailable = false;
+        m_cpuPackagePowerWatts = 0.0f;
+        m_cpuCorePowerWatts = 0.0f;
+        m_cpuDramPowerWatts = 0.0f;
+        m_lastCpuPowerPoll = 0;
+    }
 
     if (pollCpu && m_temperaturesEnabled) {
-        if (IsIntervalDue(m_lastCpuTemperaturePoll, temperatureNow, kCpuTemperaturePollMs)) {
+        if (IsIntervalDue(m_lastCpuTemperaturePoll, cadenceNow, kCpuTemperaturePollMs)) {
             PollCpuTemperature();
-            m_lastCpuTemperaturePoll = temperatureNow;
+            m_lastCpuTemperaturePoll = cadenceNow;
         }
     } else {
         m_cpuTemperatureAvailable = false;
@@ -1008,9 +1058,9 @@ void SystemMonitor::PollMetrics() {
 
     if (pollDisk && m_temperaturesEnabled) {
         ApplyDiskTemperatureResults(); // from the previous query, once the worker has finished
-        if (IsIntervalDue(m_lastDiskTemperaturePoll, temperatureNow, kDiskTemperaturePollMs)) {
+        if (IsIntervalDue(m_lastDiskTemperaturePoll, cadenceNow, kDiskTemperaturePollMs)) {
             PollDiskTemperatures();
-            m_lastDiskTemperaturePoll = temperatureNow;
+            m_lastDiskTemperaturePoll = cadenceNow;
         }
     } else {
         ClearDiskTemperatures();
@@ -1019,6 +1069,10 @@ void SystemMonitor::PollMetrics() {
     if (!pollCpu) {
         m_cpuUsage = 0.0f;
         m_cpuGHz = 0.0f;
+        m_cpuPowerAvailable = false;
+        m_cpuPackagePowerWatts = 0.0f;
+        m_cpuCorePowerWatts = 0.0f;
+        m_cpuDramPowerWatts = 0.0f;
     }
 
     if (!pollDisk) {
@@ -1031,9 +1085,9 @@ void SystemMonitor::PollMetrics() {
     }
 
     if (pollGpu && m_temperaturesEnabled) {
-        if (IsIntervalDue(m_lastGpuTemperaturePoll, temperatureNow, kGpuTemperaturePollMs)) {
+        if (IsIntervalDue(m_lastGpuTemperaturePoll, cadenceNow, kGpuTemperaturePollMs)) {
             PollGpuTemperatures();
-            m_lastGpuTemperaturePoll = temperatureNow;
+            m_lastGpuTemperaturePoll = cadenceNow;
         }
     } else {
         ClearGpuTemperatures();
@@ -2428,6 +2482,115 @@ void SystemMonitor::PollCpuTemperature() {
     if (hottestC >= kMinValidTemperatureC) {
         m_cpuTemperatureC = hottestC;
         m_cpuTemperatureAvailable = true;
+    }
+}
+
+void SystemMonitor::InitializePowerQuery() {
+    if (PdhOpenQueryW(NULL, 0, &m_pdhPowerQuery) != ERROR_SUCCESS) {
+        m_pdhPowerQuery = NULL;
+        return;
+    }
+
+    // Windows Energy Meter Interface (EMI) exposes RAPL energy metrics as milliwatts.
+    if (PdhAddEnglishCounterW(m_pdhPowerQuery, L"\\Energy Meter(*)\\Power", 0, &m_pdhPowerCounter) == ERROR_SUCCESS) {
+        PdhCollectQueryData(m_pdhPowerQuery);
+        return;
+    }
+
+    // Secondary fallback: ACPI Power Meter
+    if (PdhAddEnglishCounterW(m_pdhPowerQuery, L"\\Power Meter(*)\\Power", 0, &m_pdhPowerCounter) == ERROR_SUCCESS) {
+        PdhCollectQueryData(m_pdhPowerQuery);
+        return;
+    }
+
+    PdhCloseQuery(m_pdhPowerQuery);
+    m_pdhPowerQuery = NULL;
+    m_pdhPowerCounter = NULL;
+}
+
+void SystemMonitor::PollCpuPower() {
+    m_cpuPowerAvailable = false;
+    if (m_pdhPowerQuery == NULL || m_pdhPowerCounter == NULL) {
+        return;
+    }
+
+    if (PdhCollectQueryData(m_pdhPowerQuery) != ERROR_SUCCESS) {
+        return;
+    }
+
+    DWORD bufferSize = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArrayW(m_pdhPowerCounter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, NULL);
+    if (!((status == (PDH_STATUS)PDH_MORE_DATA || status == (PDH_STATUS)ERROR_SUCCESS) && bufferSize > 0 && itemCount > 0)) {
+        return;
+    }
+
+    if (!EnsurePdhBuffer(m_pdhPowerBuffer, m_pdhPowerBufferSize, bufferSize)) {
+        return;
+    }
+
+    PDH_FMT_COUNTERVALUE_ITEM_W* itemArray = (PDH_FMT_COUNTERVALUE_ITEM_W*)m_pdhPowerBuffer;
+    if (PdhGetFormattedCounterArrayW(m_pdhPowerCounter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, itemArray) != ERROR_SUCCESS) {
+        return;
+    }
+
+    double packageMilliwatts = 0.0;
+    double coresMilliwatts = 0.0;
+    double dramMilliwatts = 0.0;
+    double totalMilliwatts = 0.0;
+    bool foundPackage = false;
+    bool foundCores = false;
+    bool foundDram = false;
+
+    for (DWORD i = 0; i < itemCount; ++i) {
+        if (itemArray[i].FmtValue.CStatus != ERROR_SUCCESS || itemArray[i].szName == NULL) {
+            continue;
+        }
+
+        const double val = itemArray[i].FmtValue.doubleValue;
+        if (val < 0.0) {
+            continue;
+        }
+
+        const wchar_t* name = itemArray[i].szName;
+        // Check for RAPL package instances, e.g. RAPL_Package0_PKG
+        if (wcsstr(name, L"_PKG") != NULL || wcsstr(name, L"_pkg") != NULL) {
+            packageMilliwatts += val;
+            foundPackage = true;
+        } else if (wcsstr(name, L"_PP0") != NULL || wcsstr(name, L"_pp0") != NULL ||
+                   wcsstr(name, L"Core") != NULL || wcsstr(name, L"core") != NULL) {
+            coresMilliwatts += val;
+            foundCores = true;
+        } else if (wcsstr(name, L"_DRAM") != NULL || wcsstr(name, L"_dram") != NULL) {
+            dramMilliwatts += val;
+            foundDram = true;
+        } else if (wcscmp(name, L"_Total") == 0 || wcscmp(name, L"_total") == 0 ||
+                   wcsstr(name, L"Power Meter") != NULL || wcsstr(name, L"power meter") != NULL) {
+            totalMilliwatts = val;
+        }
+    }
+
+    if (foundPackage && packageMilliwatts > 0.0) {
+        m_cpuPackagePowerWatts = (float)(packageMilliwatts / 1000.0);
+        m_cpuPowerAvailable = true;
+    } else if (foundCores && coresMilliwatts > 0.0) {
+        m_cpuPackagePowerWatts = (float)(coresMilliwatts / 1000.0);
+        m_cpuPowerAvailable = true;
+    } else if (totalMilliwatts > 0.0) {
+        m_cpuPackagePowerWatts = (float)(totalMilliwatts / 1000.0);
+        m_cpuPowerAvailable = true;
+    }
+
+    if (foundCores && coresMilliwatts > 0.0) {
+        m_cpuCorePowerWatts = (float)(coresMilliwatts / 1000.0);
+    } else {
+        m_cpuCorePowerWatts = 0.0f;
+    }
+
+    if (foundDram && dramMilliwatts > 0.0) {
+        m_cpuDramPowerWatts = (float)(dramMilliwatts / 1000.0);
+    } else {
+        m_cpuDramPowerWatts = 0.0f;
     }
 }
 

@@ -12,6 +12,7 @@ struct ProcessRow {
     ULONGLONG createTime;        // (pid, createTime) identifies a process even when a pid is reused
     char name[128];              // UTF-8 image name, e.g. "msedge.exe"
     float cpuPercent;            // share of all logical processors, as Task Manager computes it
+    float cpuPowerWatts;         // estimated CPU power draw in Watts
     ULONGLONG privateWorkingSet; // bytes; Task Manager's "Memory" column
     ULONGLONG workingSet;        // bytes
     ULONGLONG commitBytes;       // private bytes (commit charge)
@@ -31,6 +32,7 @@ struct ProcessRow {
 
 struct ProcessTotals {
     float cpuPercent;            // 100 - System Idle Process share of elapsed time x logical processors
+    float cpuPackageWatts;       // CPU package power in Watts
     float ioBytesPerSec;
     float diskBytesPerSec;
     float networkBytesPerSec;
@@ -55,6 +57,8 @@ public:
     void ApplyGpuUsage(const ProcessGpuUsage* entries, UINT count);
     // Merges EtwMonitor's per-process disk and network rates into the current rows and totals.
     void ApplyIoUsage(const ProcessIoUsage* entries, UINT count);
+    // Applies CPU package power (Watts) and computes estimated per-process power.
+    void ApplyCpuPower(float totalPackageWatts);
     void Release();
 
     UINT GetRowCount() const { return m_rowCount; }

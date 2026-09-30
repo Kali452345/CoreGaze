@@ -68,6 +68,7 @@ The range is 12-28 px, saved as `[Processes] FontSize`.
 | Name | Image name. With **Group by name**, processes sharing a name collapse into one row, e.g. `msedge.exe (49)`, with summed values; expand it with the arrow, a double-click, the Right key or Enter. |
 | PID | Process id (blank on group rows) |
 | CPU | Share of all logical processors, computed like Task Manager |
+| Power | Estimated CPU power draw in Watts, allocated from package power by active CPU share |
 | Memory | Private working set (Task Manager's Memory column) |
 | Disk | Disk read + write (administrator only, from ETW; hover for the read/write split) |
 | Network | TCP + UDP send + receive in bits/s (administrator only, from ETW; hover for the split) |
@@ -78,8 +79,9 @@ The range is 12-28 px, saved as `[Processes] FontSize`.
 
 - **Sorting:** click a header (numeric columns sort descending first). Group rows are sorted by their summed value, and the processes inside a group by the same column.
 - **Layout:** columns can be resized, reordered and hidden. ImGui saves the layout and sort order to `%APPDATA%\CoreGaze\processes_table.ini`.
-- **Totals row:** pinned under the header. It shows the process count (or "N of M" while filtering), total CPU, memory load, total GPU and total I/O; with administrator rights it also shows total disk and network.
-- **Heat tint:** CPU, Memory, Disk, Network, GPU and I/O cells are tinted amber in proportion to the load, as in Task Manager. Zero values are dimmed.
+- **Totals row:** pinned under the header. It shows the process count (or "N of M" while filtering), total CPU, total package power wattage, memory load, total GPU and total I/O; with administrator rights it also shows total disk and network.
+- **Status bar:** displays process/thread/handle counts, system CPU utilization with package power draw (`CPU XX% (XX.X W)`), physical RAM usage, and ETW/administrator status.
+- **Heat tint:** CPU, Power, Memory, Disk, Network, GPU and I/O cells are tinted amber in proportion to the load, as in Task Manager. Zero values are dimmed.
 - **Rendering:** rows are virtualized with `ImGuiListClipper`, so only visible rows are drawn.
 
 ## Filtering and Keyboard

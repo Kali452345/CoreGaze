@@ -116,6 +116,8 @@ public:
     DWORD GetNetworkDisplayMode() const { return m_networkDisplayMode; }
     void SetTemperaturesEnabled(bool enabled);
     bool AreTemperaturesEnabled() const { return m_temperaturesEnabled; }
+    void SetCpuPowerEnabled(bool enabled);
+    bool IsCpuPowerEnabled() const { return m_cpuPowerEnabled; }
     void RefreshNetworkIdentityNow();
     void RefreshDiskTopologyNow();
     void RequestDiskTopologyRefresh();
@@ -148,6 +150,10 @@ public:
     float GetCPUGHz() const { return m_cpuGHz; }
     bool IsCPUTemperatureAvailable() const { return m_cpuTemperatureAvailable; }
     float GetCPUTemperatureC() const { return m_cpuTemperatureC; }
+    bool IsCpuPowerAvailable() const { return m_cpuPowerAvailable; }
+    float GetCpuPackagePowerWatts() const { return m_cpuPackagePowerWatts; }
+    float GetCpuCorePowerWatts() const { return m_cpuCorePowerWatts; }
+    float GetCpuDramPowerWatts() const { return m_cpuDramPowerWatts; }
     DWORD GetRAMSpeedMHz() const { return m_ramSpeedMHz; }
     float GetRAMUsedGB() const { return m_ramUsedGB; }
     float GetRAMTotalGB() const { return m_ramTotalGB; }
@@ -330,6 +336,18 @@ private:
     BYTE* m_pdhThermalBuffer;
     DWORD m_pdhThermalBufferSize;
 
+    // Power queries (RAPL Energy Meter or Power Meter) live in their own query.
+    PDH_HQUERY m_pdhPowerQuery;
+    PDH_HCOUNTER m_pdhPowerCounter;
+    BYTE* m_pdhPowerBuffer;
+    DWORD m_pdhPowerBufferSize;
+    bool m_cpuPowerEnabled;
+    bool m_cpuPowerAvailable;
+    float m_cpuPackagePowerWatts;
+    float m_cpuCorePowerWatts;
+    float m_cpuDramPowerWatts;
+    ULONGLONG m_lastCpuPowerPoll;
+
     // Disk temperatures are read on a thread-pool thread. Some drives (USB bridges, some
     // controllers) take seconds to reject the query, which would freeze the UI thread. The UI
     // thread fills the job, submits it, and applies the results once the worker clears `busy`.
@@ -354,6 +372,8 @@ private:
     void SyncLegacyGpuFields();
     void InitializeThermalZoneQuery();
     void PollCpuTemperature();
+    void InitializePowerQuery();
+    void PollCpuPower();
     void PollGpuTemperatures();
     void PollDiskTemperatures();
     void ApplyDiskTemperatureResults();

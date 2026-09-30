@@ -343,6 +343,7 @@ bool ProcessMonitor::Sample() {
             row->cpuTime100ns = cpuTime;
             row->ioBytes = (ULONGLONG)info->ReadTransferCount.QuadPart + (ULONGLONG)info->WriteTransferCount.QuadPart;
             row->cpuPercent = 0.0f;
+            row->cpuPowerWatts = 0.0f;
             row->ioBytesPerSec = 0.0f;
             row->diskReadBytesPerSec = 0.0f;
             row->diskWriteBytesPerSec = 0.0f;
@@ -452,5 +453,24 @@ void ProcessMonitor::ApplyIoUsage(const ProcessIoUsage* entries, UINT count) {
         row->diskWriteBytesPerSec = usage.diskWriteBytesPerSec;
         row->networkSendBytesPerSec = usage.networkSendBytesPerSec;
         row->networkReceiveBytesPerSec = usage.networkReceiveBytesPerSec;
+    }
+}
+
+void ProcessMonitor::ApplyCpuPower(float totalPackageWatts) {
+    m_totals.cpuPackageWatts = totalPackageWatts;
+    if (totalPackageWatts <= 0.0f || m_totals.cpuPercent < 0.1f) {
+        for (UINT i = 0; i < m_rowCount; ++i) {
+            m_rows[i].cpuPowerWatts = 0.0f;
+        }
+        return;
+    }
+
+    const float totalCpu = m_totals.cpuPercent;
+    for (UINT i = 0; i < m_rowCount; ++i) {
+        if (m_rows[i].cpuPercent > 0.0f) {
+            m_rows[i].cpuPowerWatts = totalPackageWatts * (m_rows[i].cpuPercent / totalCpu);
+        } else {
+            m_rows[i].cpuPowerWatts = 0.0f;
+        }
     }
 }

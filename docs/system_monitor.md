@@ -6,6 +6,7 @@ The `SystemMonitor` component is the native telemetry backend for the overlay. I
 
 ## Cadence Separation
 - Fast cadence (`500ms`, `1000ms`, `2000ms`): numeric counters (CPU, RAM, GPU utilization/memory, disk active/read/write throughput, network RX/TX rates).
+- CPU power consumption (Watts via PDH Energy Meter / RAPL): dedicated `1s` cadence timer, only while CPU is visible and power monitoring is enabled. See `power_metrics.md`.
 - Disk capacity (used/free GB via `GetDiskFreeSpaceExW`): every `30s`, and immediately on a disk topology rebuild. Free space rarely changes and the call can touch removable media.
 - Temperatures: own timers (`2s` CPU/GPU, `10s` disk), only while the metric is visible and temperatures are enabled. See `temperature_metrics.md`.
 - Network identity (active network source, SSID labels, adapter lists): event-driven, with an adaptive safety timer (`2s` while settling after a network event, `30s` otherwise). See `network_identity.md`.
@@ -21,6 +22,7 @@ The monitor supports runtime control from tray settings:
 - `SetNetworkPrimaryMode(...)`, `SetNetworkPrimaryIfIndex(...)`: auto/manual primary network source.
 - `SetNetworkSecondaryEnabled(...)`, `SetNetworkSecondaryIfIndex(...)`: optional secondary adapter.
 - `SetTemperaturesEnabled(...)`: CPU/GPU/disk temperature polling on or off.
+- `SetCpuPowerEnabled(...)`: CPU wattage polling on or off.
 - `SetNetworkDisplayMode(...)`: primary split vs primary + secondary display (legacy total mode normalizes to split).
 - `Update()` polls when the polling interval has elapsed and returns `true` when it did. The main loop uses the result to draw the HUD only after new data (see `docs/process_window.md`, "Main Loop Integration").
 - `SetProcessGpuTrackingEnabled(...)`: per-process GPU load for the process window, read through `GetProcessGpuUsage(...)`. It keeps the GPU engine query running even when the GPU metric is off. Turning it off frees its buffers. See `docs/process_monitor.md`.
@@ -28,6 +30,7 @@ The monitor supports runtime control from tray settings:
 ## CPU and RAM Collection
 - CPU utilization: `\Processor(_Total)\% Processor Time` via PDH, which is what Task Manager shows since KB5064081 (Windows 11 24H2/25H2).
 - CPU GHz: registry base MHz + PDH `\Processor Information(_Total)\% Processor Performance`.
+- CPU power: `\Energy Meter(*)\Power` (Intel/AMD RAPL package, core, and DRAM domains in milliwatts, converted to Watts; ACPI `\Power Meter` fallback).
 - RAM: `GlobalMemoryStatusEx`.
 
 ## GPU Collection

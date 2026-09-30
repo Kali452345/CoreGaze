@@ -16,10 +16,12 @@
 #include "ProcessWindow.h"
 #include "Elevation.h"
 
+#ifdef _MSC_VER
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "wtsapi32.lib")
+#endif
 
 // Data
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -99,6 +101,7 @@ enum TrayCommandId : UINT {
     ID_TRAY_TEMPERATURE_SHOW = 5701,
     ID_TRAY_TEMPERATURE_CELSIUS = 5702,
     ID_TRAY_TEMPERATURE_FAHRENHEIT = 5703,
+    ID_TRAY_CPU_SHOW_POWER = 5704,
     ID_TRAY_STARTUP_TOGGLE = 5901,
     ID_TRAY_RESTART_ELEVATED = 5902,
     ID_TRAY_ALWAYS_ELEVATED = 5903,
@@ -120,6 +123,7 @@ struct AppSettings {
     DWORD networkDisplayMode;
     BOOL showTemperatures;
     BOOL temperatureFahrenheit;
+    BOOL showCpuPower;
     BOOL startupEnabled;
     BOOL alwaysElevated;      // start through the elevated scheduled task (see Elevation.h)
     float overlayPosX;
@@ -142,6 +146,7 @@ static AppSettings g_appSettings = {
     NETWORK_DISPLAY_RX_TX,
     TRUE,
     FALSE,
+    TRUE,
     FALSE,
     FALSE,
     0.0f,
@@ -550,7 +555,12 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             }
 
             char cpuBuf[64];
-            snprintf(cpuBuf, sizeof(cpuBuf), "%.1f%% @ %.2f GHz", sysMonitor.GetCPUUsage(), sysMonitor.GetCPUGHz());
+            if (g_appSettings.showCpuPower && sysMonitor.IsCpuPowerAvailable()) {
+                snprintf(cpuBuf, sizeof(cpuBuf), "%.1f%% @ %.2f GHz (%.1f W)",
+                         sysMonitor.GetCPUUsage(), sysMonitor.GetCPUGHz(), sysMonitor.GetCpuPackagePowerWatts());
+            } else {
+                snprintf(cpuBuf, sizeof(cpuBuf), "%.1f%% @ %.2f GHz", sysMonitor.GetCPUUsage(), sysMonitor.GetCPUGHz());
+            }
             const float cpuProgress = sysMonitor.GetCPUUsage() / 100.0f;
             const ImVec4 cpuBaseColor(0.2f, 0.6f, 1.0f, 1.0f);
             DrawMetricTitle(cpuTitle,
@@ -558,6 +568,17 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                 sysMonitor.GetCPUTemperatureC(), kCpuTemperatureWarningC, kCpuTemperatureCriticalC, barWidth);
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ResolveUtilizationThresholdColor(cpuProgress, cpuBaseColor));
             ImGui::ProgressBar(cpuProgress, ImVec2(barWidth, barHeight), cpuBuf);
+            if (g_appSettings.showCpuPower && sysMonitor.IsCpuPowerAvailable() && ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::Text("CPU Package Power: %.2f W", sysMonitor.GetCpuPackagePowerWatts());
+                if (sysMonitor.GetCpuCorePowerWatts() > 0.0f) {
+                    ImGui::Text("  Cores (IA): %.2f W", sysMonitor.GetCpuCorePowerWatts());
+                }
+                if (sysMonitor.GetCpuDramPowerWatts() > 0.0f) {
+                    ImGui::Text("  Memory (DRAM): %.2f W", sysMonitor.GetCpuDramPowerWatts());
+                }
+                ImGui::EndTooltip();
+            }
             ImGui::PopStyleColor();
             ImGui::Spacing();
         }
@@ -1440,6 +1461,7 @@ void LoadAppSettings() {
     g_appSettings.networkDisplayMode = NormalizeNetworkDisplayMode(GetPrivateProfileIntW(L"Network", L"DisplayMode", NETWORK_DISPLAY_RX_TX, g_configPath));
     g_appSettings.showTemperatures = GetPrivateProfileIntW(L"Temperature", L"Show", 1, g_configPath) ? TRUE : FALSE;
     g_appSettings.temperatureFahrenheit = GetPrivateProfileIntW(L"Temperature", L"Fahrenheit", 0, g_configPath) ? TRUE : FALSE;
+    g_appSettings.showCpuPower = GetPrivateProfileIntW(L"CPU", L"ShowPower", 1, g_configPath) ? TRUE : FALSE;
     BOOL startupRegistryEnabled = IsStartupEnabledInRegistry() ? TRUE : FALSE;
     g_appSettings.startupEnabled = GetPrivateProfileIntW(L"General", L"StartWithWindows", startupRegistryEnabled ? 1 : 0, g_configPath) ? TRUE : FALSE;
     g_appSettings.alwaysElevated = GetPrivateProfileIntW(L"General", L"AlwaysElevated", 0, g_configPath) ? TRUE : FALSE;
@@ -1485,6 +1507,7 @@ void SaveAppSettings() {
     WriteUIntSetting(L"Network", L"DisplayMode", NormalizeNetworkDisplayMode(g_appSettings.networkDisplayMode));
     WriteUIntSetting(L"Temperature", L"Show", g_appSettings.showTemperatures ? 1u : 0u);
     WriteUIntSetting(L"Temperature", L"Fahrenheit", g_appSettings.temperatureFahrenheit ? 1u : 0u);
+    WriteUIntSetting(L"CPU", L"ShowPower", g_appSettings.showCpuPower ? 1u : 0u);
     WriteUIntSetting(L"General", L"StartWithWindows", g_appSettings.startupEnabled ? 1u : 0u);
     WriteUIntSetting(L"Window", L"HasSavedPos", g_appSettings.hasSavedPos ? 1u : 0u);
     if (g_appSettings.hasSavedPos) {
@@ -1523,6 +1546,7 @@ void ApplyRuntimeSettings(HWND hwnd) {
         g_systemMonitor->SetNetworkSecondaryIfIndex(g_appSettings.networkSecondaryIfIndex);
         g_systemMonitor->SetNetworkDisplayMode(g_appSettings.networkDisplayMode);
         g_systemMonitor->SetTemperaturesEnabled(g_appSettings.showTemperatures != FALSE);
+        g_systemMonitor->SetCpuPowerEnabled(g_appSettings.showCpuPower != FALSE);
     }
 
     ShowWindow(hwnd, g_appSettings.overlayVisible ? SW_SHOWNA : SW_HIDE);
@@ -1702,6 +1726,9 @@ void HandleTrayCommand(HWND hwnd, UINT commandId) {
     case ID_TRAY_TEMPERATURE_FAHRENHEIT:
         g_appSettings.temperatureFahrenheit = TRUE;
         break;
+    case ID_TRAY_CPU_SHOW_POWER:
+        g_appSettings.showCpuPower = g_appSettings.showCpuPower ? FALSE : TRUE;
+        break;
     case ID_TRAY_STARTUP_TOGGLE:
         g_appSettings.startupEnabled = g_appSettings.startupEnabled ? FALSE : TRUE;
         break;
@@ -1768,6 +1795,7 @@ void ShowTrayContextMenu(HWND hwnd) {
 
     HMENU rootMenu = CreatePopupMenu();
     HMENU pollingMenu = CreatePopupMenu();
+    HMENU cpuMenu = CreatePopupMenu();
     HMENU gpuMenu = CreatePopupMenu();
     HMENU gpuModeMenu = CreatePopupMenu();
     HMENU gpuSelectMenu = CreatePopupMenu();
@@ -1789,6 +1817,9 @@ void ShowTrayContextMenu(HWND hwnd) {
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_GPU) != 0), ID_TRAY_SHOW_GPU, L"Show GPU(s)");
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_DISK) != 0), ID_TRAY_SHOW_DISK, L"Show Disk(s)");
     AppendMenuW(rootMenu, MF_STRING | CheckedFlag((g_appSettings.visibleMetricsMask & SYSTEM_METRIC_NETWORK) != 0), ID_TRAY_SHOW_NETWORK, L"Show Network");
+
+    AppendMenuW(cpuMenu, MF_STRING | CheckedFlag(g_appSettings.showCpuPower), ID_TRAY_CPU_SHOW_POWER, L"Show CPU Power");
+    AppendMenuW(rootMenu, MF_POPUP, (UINT_PTR)cpuMenu, L"CPU");
 
     AppendMenuW(gpuModeMenu, MF_STRING | CheckedFlag(g_appSettings.gpuDisplayMode == GPU_DISPLAY_TARGETED), ID_TRAY_GPU_MODE_TARGETED, L"Targeted (Single GPU)");
     AppendMenuW(gpuModeMenu, MF_STRING | CheckedFlag(g_appSettings.gpuDisplayMode == GPU_DISPLAY_HIGHEST_LOAD), ID_TRAY_GPU_MODE_HIGHEST_LOAD, L"Highest-Load (Dynamic)");

@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # in main.cpp, and (read back from the exe) the installer. Release CI overrides it from the tag
 # with -DCOREGAZE_VERSION=<x.y.z>.
 if (NOT DEFINED COREGAZE_VERSION)
-    set(COREGAZE_VERSION "1.0.0")
+    set(COREGAZE_VERSION "2.0.0")
 endif()
 if (NOT COREGAZE_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
     message(FATAL_ERROR "COREGAZE_VERSION must start with major.minor.patch (got '${COREGAZE_VERSION}')")

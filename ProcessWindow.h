@@ -36,11 +36,12 @@ public:
     // Samples and draws when due. Returns how many ms the caller may wait before the next call.
     DWORD Tick();
 
-private:
+public:
     enum Column {
         COL_NAME = 0,
         COL_PID,
         COL_CPU,
+        COL_POWER,
         COL_MEMORY,
         COL_DISK,
         COL_NETWORK,
@@ -55,6 +56,8 @@ private:
         COL_PARENT_PID,
         COL_COUNT
     };
+
+private:
 
     enum LineKind {
         LINE_PROCESS = 0,   // a process on its own (ungrouped, or the only one with its name)
@@ -74,6 +77,7 @@ private:
         DWORD nameHash;
         const char* name;
         float cpuPercent;
+        float cpuPowerWatts;
         ULONGLONG privateWorkingSet;
         ULONGLONG workingSet;
         ULONGLONG commitBytes;

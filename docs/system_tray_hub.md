@@ -20,6 +20,10 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
 - `Restart as Administrator` (only when not elevated): relaunches CoreGaze through UAC.
 - `Exit / Quit`.
 
+## CPU Controls
+- `CPU` submenu:
+  - `Show CPU Power`: toggles package power telemetry readout on the CPU progress bar and stops polling when off. See `power_metrics.md`.
+
 ## GPU Controls
 - `Show Dedicated VRAM`: toggles the VRAM bar under each GPU row.
 - Display mode submenu:
@@ -51,6 +55,7 @@ The tray menu is the runtime control surface for telemetry visibility, sampling 
 ## Persistence Keys
 - `Display`: `VisibleMask`, `OverlayVisible`
 - `Polling`: `IntervalMs`
+- `CPU`: `ShowPower`
 - `Disk`: `SelectedMask`
 - `GPU`: `DisplayMode`, `SelectedAdapterIndex`, `ShowVram`
 - `Network`: `PrimaryMode`, `PrimaryIfIndex`, `SecondaryEnabled`, `SecondaryIfIndex`, `DisplayMode`

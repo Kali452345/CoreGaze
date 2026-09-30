@@ -57,6 +57,7 @@ const ColumnInfo kColumns[] = {
     { "Name",        230.0f, ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_NoHide },
     { "PID",          58.0f, ImGuiTableColumnFlags_WidthFixed },
     { "CPU",          62.0f, kNumeric | ImGuiTableColumnFlags_DefaultSort },
+    { "Power",        68.0f, kNumeric },
     { "Memory",       88.0f, kNumeric },
     { "Disk",         82.0f, kNumeric },
     { "Network",      86.0f, kNumeric },
@@ -119,6 +120,16 @@ void FormatPercent(float value, char* output, int outputSize) {
     }
 }
 
+void FormatPowerWatts(float watts, char* output, int outputSize) {
+    if (watts <= 0.001f) {
+        snprintf(output, outputSize, "-");
+    } else if (watts < 0.1f) {
+        snprintf(output, outputSize, "<0.1 W");
+    } else {
+        snprintf(output, outputSize, "%.1f W", watts);
+    }
+}
+
 void FormatMegabytes(ULONGLONG bytes, char* output, int outputSize) {
     snprintf(output, outputSize, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
 }
@@ -147,20 +158,21 @@ void FormatBitRate(float bytesPerSec, char* output, int outputSize) {
 
 double RowSortValue(const ProcessRow& row, int column) {
     switch (column) {
-    case 1: return row.pid;                                                        // COL_PID
-    case 2: return row.cpuPercent;                                                 // COL_CPU
-    case 3: return (double)row.privateWorkingSet;                                  // COL_MEMORY
-    case 4: return (double)row.diskReadBytesPerSec + row.diskWriteBytesPerSec;     // COL_DISK
-    case 5: return (double)row.networkSendBytesPerSec + row.networkReceiveBytesPerSec; // COL_NETWORK
-    case 6: return row.gpuPercent;                                                 // COL_GPU
-    case 7: return (row.gpuPercent > 0.0f) ? (double)row.gpuEngineType : -1.0;     // COL_GPU_ENGINE
-    case 8: return row.ioBytesPerSec;                                              // COL_IO
-    case 9: return row.threadCount;                                                // COL_THREADS
-    case 10: return row.handleCount;                                               // COL_HANDLES
-    case 11: return (double)row.workingSet;                                        // COL_WORKING_SET
-    case 12: return (double)row.commitBytes;                                       // COL_COMMIT
-    case 13: return row.sessionId;                                                 // COL_SESSION
-    case 14: return row.parentPid;                                                 // COL_PARENT_PID
+    case ProcessWindow::COL_PID: return row.pid;
+    case ProcessWindow::COL_CPU: return row.cpuPercent;
+    case ProcessWindow::COL_POWER: return row.cpuPowerWatts;
+    case ProcessWindow::COL_MEMORY: return (double)row.privateWorkingSet;
+    case ProcessWindow::COL_DISK: return (double)row.diskReadBytesPerSec + row.diskWriteBytesPerSec;
+    case ProcessWindow::COL_NETWORK: return (double)row.networkSendBytesPerSec + row.networkReceiveBytesPerSec;
+    case ProcessWindow::COL_GPU: return row.gpuPercent;
+    case ProcessWindow::COL_GPU_ENGINE: return (row.gpuPercent > 0.0f) ? (double)row.gpuEngineType : -1.0;
+    case ProcessWindow::COL_IO: return row.ioBytesPerSec;
+    case ProcessWindow::COL_THREADS: return row.threadCount;
+    case ProcessWindow::COL_HANDLES: return row.handleCount;
+    case ProcessWindow::COL_WORKING_SET: return (double)row.workingSet;
+    case ProcessWindow::COL_COMMIT: return (double)row.commitBytes;
+    case ProcessWindow::COL_SESSION: return row.sessionId;
+    case ProcessWindow::COL_PARENT_PID: return row.parentPid;
     default: return 0.0;
     }
 }
@@ -758,6 +770,12 @@ void ProcessWindow::SampleData() {
         const UINT gpuCount = m_systemMonitor->GetProcessGpuUsage(&gpuUsage);
         m_monitor.ApplyGpuUsage(gpuUsage, gpuCount);
 
+        if (m_systemMonitor->IsCpuPowerAvailable()) {
+            m_monitor.ApplyCpuPower(m_systemMonitor->GetCpuPackagePowerWatts());
+        } else {
+            m_monitor.ApplyCpuPower(0.0f);
+        }
+
         m_gpuTotalPercent = 0.0f;
         const UINT adapterRows = m_systemMonitor->GetDisplayedGPUCount();
         for (UINT i = 0; i < adapterRows; ++i) {
@@ -870,6 +888,7 @@ int ProcessWindow::CompareGroups(const void* left, const void* right) {
     case COL_NAME: result = _stricmp(a.name, b.name); break;
     case COL_PID: va = a.memberCount; vb = b.memberCount; break;
     case COL_CPU: va = a.cpuPercent; vb = b.cpuPercent; break;
+    case COL_POWER: va = a.cpuPowerWatts; vb = b.cpuPowerWatts; break;
     case COL_MEMORY: va = (double)a.privateWorkingSet; vb = (double)b.privateWorkingSet; break;
     case COL_DISK: va = a.diskBytesPerSec; vb = b.diskBytesPerSec; break;
     case COL_NETWORK: va = a.networkBytesPerSec; vb = b.networkBytesPerSec; break;
@@ -967,6 +986,7 @@ void ProcessWindow::RebuildView() {
             for (UINT m = start; m < end; ++m) {
                 const ProcessRow& row = rows[m_members[m]];
                 group.cpuPercent += row.cpuPercent;
+                group.cpuPowerWatts += row.cpuPowerWatts;
                 group.privateWorkingSet += row.privateWorkingSet;
                 group.workingSet += row.workingSet;
                 group.commitBytes += row.commitBytes;
@@ -1404,6 +1424,7 @@ void ProcessWindow::DrawTable() {
         const char* tooltip = NULL;
         switch (c) {
         case COL_CPU: tooltip = "Share of all logical processors, computed like Task Manager."; break;
+        case COL_POWER: tooltip = "Estimated CPU power draw in Watts, allocated from package power by active CPU share."; break;
         case COL_MEMORY: tooltip = "Private working set (Task Manager's Memory column)."; break;
         case COL_DISK:
             tooltip = m_etw.IsRunning() ? "Disk reads + writes (kernel ETW)."
@@ -1469,6 +1490,13 @@ void ProcessWindow::DrawTotalsRow(float rowHeight) {
             ImGui::TextUnformatted(text);
             continue;
         case COL_CPU: snprintf(text, sizeof(text), "%.0f%%", totals.cpuPercent); break;
+        case COL_POWER:
+            if (totals.cpuPackageWatts > 0.0f) {
+                snprintf(text, sizeof(text), "%.1f W", totals.cpuPackageWatts);
+            } else {
+                snprintf(text, sizeof(text), "-");
+            }
+            break;
         case COL_MEMORY: snprintf(text, sizeof(text), "%lu%%", m_memoryStatus.dwMemoryLoad); break;
         case COL_DISK:
             if (m_etw.IsRunning()) FormatByteRate(totals.diskBytesPerSec, text, sizeof(text));
@@ -1554,6 +1582,7 @@ void ProcessWindow::DrawLine(int lineIndex, float rowHeight) {
 
     // Values, from the group aggregate or the process.
     const float cpu = group ? group->cpuPercent : row->cpuPercent;
+    const float power = group ? group->cpuPowerWatts : row->cpuPowerWatts;
     const ULONGLONG memory = group ? group->privateWorkingSet : row->privateWorkingSet;
     const float disk = group ? group->diskBytesPerSec : row->diskReadBytesPerSec + row->diskWriteBytesPerSec;
     const float network = group ? group->networkBytesPerSec : row->networkSendBytesPerSec + row->networkReceiveBytesPerSec;
@@ -1578,6 +1607,11 @@ void ProcessWindow::DrawLine(int lineIndex, float rowHeight) {
             ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, HeatColor(cpu / 25.0f));
             FormatPercent(cpu, text, sizeof(text));
             TextRight(text, cpu < 0.05f);
+            break;
+        case COL_POWER:
+            ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, HeatColor(power / 15.0f));
+            FormatPowerWatts(power, text, sizeof(text));
+            TextRight(text, power <= 0.001f);
             break;
         case COL_MEMORY:
             ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, HeatColor((float)((double)memory / totalRam * 4.0)));
@@ -1757,10 +1791,17 @@ void ProcessWindow::DrawStatusBar() {
     ImGui::PushClipRect(lineStart, ImVec2(clipRight, lineStart.y + ImGui::GetFrameHeight()), true);
 
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("Processes %u   Threads %u   Handles %u   CPU %.0f%%   Memory %.1f / %.1f GB (%lu%%)%s",
-                        totals.processCount, totals.threadCount, totals.handleCount, totals.cpuPercent,
-                        usedGb, totalGb, m_memoryStatus.dwMemoryLoad,
-                        m_settings.refreshMs == 0 ? "   Updates paused" : "");
+    if (totals.cpuPackageWatts > 0.0f) {
+        ImGui::TextDisabled("Processes %u   Threads %u   Handles %u   CPU %.0f%% (%.1f W)   Memory %.1f / %.1f GB (%lu%%)%s",
+                            totals.processCount, totals.threadCount, totals.handleCount, totals.cpuPercent, totals.cpuPackageWatts,
+                            usedGb, totalGb, m_memoryStatus.dwMemoryLoad,
+                            m_settings.refreshMs == 0 ? "   Updates paused" : "");
+    } else {
+        ImGui::TextDisabled("Processes %u   Threads %u   Handles %u   CPU %.0f%%   Memory %.1f / %.1f GB (%lu%%)%s",
+                            totals.processCount, totals.threadCount, totals.handleCount, totals.cpuPercent,
+                            usedGb, totalGb, m_memoryStatus.dwMemoryLoad,
+                            m_settings.refreshMs == 0 ? "   Updates paused" : "");
+    }
     if (m_statusText[0] != '\0') {
         if (GetTickCount64() >= m_statusExpireTick) {
             m_statusText[0] = '\0';

@@ -3,14 +3,18 @@
 CoreGaze is a lightweight Windows resource-monitor overlay built with C++, Win32, DirectX 11, and Dear ImGui.
 
 ## Features
-- Always-on-top desktop overlay with low-overhead polling cadence.
-- CPU, RAM, GPU, Disk, and Network telemetry.
-- Task Manager-style process window (tray `Processes...` or `Ctrl+Shift+Alt+P`): per-process CPU, memory, GPU, I/O, and (as administrator) disk and network, with sorting, filtering, grouping by name, End task and priority. It costs a small fraction of Task Manager's CPU and memory; see `docs/process_window.md`.
-- Optional administrator mode (`Restart as Administrator`, or `Always Run as Administrator` through a scheduled task); see `docs/elevation.md`.
-- Tray-based runtime controls and persisted settings.
-- Startup management via tray toggle and installer startup checkbox.
-- Single-instance guard and crash diagnostics.
-- Inno Setup installer with upgrade-safe AppId.
+- **Always-on-top Desktop HUD**: Low-overhead hardware telemetry overlay with per-monitor v2 DPI awareness, ALT-drag repositioning, and click-through transparency.
+- **CPU Telemetry & Power Consumption**: Dynamic GHz, accurate % Processor Time (matching Windows 11 Task Manager), live CPU package wattage via Windows Energy Meter / RAPL, and domain breakdown hover tooltip (Cores, DRAM, Uncore); see `docs/power_metrics.md`.
+- **Live Temperature Metrics**: CPU, GPU, and NVMe/SSD storage temperatures in °C or °F with automatic thermal warning/critical color coding; see `docs/temperature_metrics.md`.
+- **Task Manager-style Process Window** (tray `Processes...` or `Ctrl+Shift+Alt+P`):
+  - Per-process CPU, estimated power draw (Watts), private working set memory, GPU engine usage, and total I/O.
+  - Optional elevated kernel ETW session for true per-process Disk read/write and Network send/receive rates.
+  - Sorting, instant filtering (Ctrl+F), name grouping with child expansion, adjustable font scaling (Ctrl + Wheel), End task with PID-reuse protection, priority management, and clipboard export. Consumes a tiny fraction of Task Manager's CPU and memory; see `docs/process_window.md`.
+- **Multi-Adapter GPU Monitoring**: Targeted, Highest-Load, Multi-GPU (all rows), or Aggregate modes with dedicated VRAM bars.
+- **Multi-Drive & Network Identity**: Selected-drive fixed storage monitoring with capacity indicators, and event-driven primary/secondary network adapters with live SSID/cellular labeling.
+- **Elevation & Background Startup**: Non-elevated by default; optional UAC restart or seamless `Always Run as Administrator` via an on-demand scheduled task; see `docs/elevation.md`.
+- **Runtime Tray Hub & Settings**: Comprehensive context menu, hotkeys (`Ctrl+Shift+Alt+O` for overlay, `Ctrl+Shift+Alt+P` for processes), and persistent INI configuration.
+- **Installer & CI**: Inno Setup installer with upgrade-safe AppId, automatic VC++ redist avoidance via MinGW static runtime, and automated GitHub Actions release workflow.
 
 ## Requirements
 - Windows 10/11 (x64)

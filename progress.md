@@ -785,3 +785,30 @@
   - Measured: first process sample at 0.65 s after launch. C: still reads 40 C; the drives with no sensor are still marked as such.
   - This also removes a 2 s HUD freeze after every unlock, resume and display-on, which rebuild the disk counters.
 - Docs: `process_window.md`, `elevation.md`, `single_instance.md`, `startup_management.md`, `system_tray_hub.md`, `installer_upgrade.md`, `temperature_metrics.md`.
+
+## 2026-09-30: CPU Power Telemetry & Version 2.0.0 Release Readiness
+
+**Summary of Work Done:**
+- Added native CPU power consumption telemetry (Watts) without kernel drivers or WMI:
+  - Captures Intel and AMD Running Average Power Limit (RAPL) MSRs via Windows Energy Meter Interface (EMI) PDH counter `\Energy Meter(*)\Power` (mW to W) with ACPI `\Power Meter(*)\Power` fallback.
+  - Aggregates RAPL domains: Package/Socket (`_PKG`), Cores (`_PP0` / `Core`), and Memory Controller / DRAM (`_DRAM`).
+  - Gated polling cadence (1s) with zero steady-state heap allocations using grow-only double buffers (`m_pdhPowerBuffer`).
+- Desktop HUD Integration:
+  - CPU progress bar renders: `XX.X% @ X.XX GHz (XX.X W)`.
+  - Hover tooltip displays live package power and core/memory domain breakdowns.
+- Process Window Integration:
+  - Added `Power` column (`COL_POWER`, 68 px default width) directly adjacent to `CPU`.
+  - Proportional allocation formula: $P_{\text{proc}} = P_{\text{package}} \times \frac{\text{CPU}\%_{\text{proc}}}{\text{CPU}\%_{\text{total}}}$.
+  - Amber heat-map cell tinting (`HeatColor`), numeric sorting, group summation, child process breakdown, totals row packaging, and status bar readout: `CPU XX% (XX.X W)`.
+- Runtime Controls & Persistence:
+  - Added tray context menu **CPU** submenu with **Show CPU Power** toggle.
+  - Persisted in `%APPDATA%\CoreGaze\config.ini`: `[CPU] ShowPower=1`.
+- Documentation & Version 2 Readiness:
+  - Created `docs/power_metrics.md`. Updated `docs/system_monitor.md`, `docs/process_monitor.md`, `docs/process_window.md`, `docs/system_tray_hub.md`, and `README.md`.
+  - Bumped default `COREGAZE_VERSION` to `2.0.0` in `CMakeLists.txt`.
+  - Silenced MinGW pragma comment warnings using `#ifdef _MSC_VER`.
+
+**Current State:**
+- Clean compilation in Release mode (MinGW GCC 16.2.0, C++20).
+- All features verified and ready for v2.0.0 release.
+
